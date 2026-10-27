@@ -41,6 +41,17 @@ To add more music, click **+** in the bottom-left corner, press **Ctrl+O**, or d
 - **Shuffle and Repeat** (Off, All or One), plus a toggle for the artwork pane. Artwork comes from tags embedded in the file, or
   from `cover.jpg` / `folder.jpg` next to the file.
 - **Play counts** are tracked and feed the smart playlists.
+- **Lyrics** (speech-bubble button in the bottom-right corner): a pane on the right shows lyrics for the playing song.
+  Synced lyrics scroll with the music: the current line is dark, and clicking a line jumps to that point in the song.
+  iMelodiae checks these sources in order:
+  1. a `.lrc` file next to the song, with the same name (`Song.flac` → `Song.lrc`)
+  2. lyrics embedded in the file's tags
+  3. [LRCLIB](https://lrclib.net), a free lyrics database. Only the title, artist, album and duration are sent,
+     and only while the lyrics pane is open. Results are cached in `~/.cache/iMelodiae/lyrics/`. Songs LRCLIB
+     doesn't have are checked again after a week.
+- **Audio output switching:** use the speaker button in the bottom-right corner to pick System Default or a
+  specific device, such as a USB DAC or Bluetooth speaker. You can switch mid-song; playback carries on from the same spot. The choice is
+  remembered by the device's PipeWire node name. If that device is unplugged, iMelodiae falls back to the default.
 
 ### Keyboard
 
@@ -55,6 +66,7 @@ To add more music, click **+** in the bottom-left corner, press **Ctrl+O**, or d
 
 - Library database: `~/.local/share/iMelodiae/library.json`
 - Artwork cache: `~/.cache/iMelodiae/artwork/`
+- Lyrics cache: `~/.cache/iMelodiae/lyrics/`
 - Settings (window layout, volume, column widths): `~/.config/iMelodiae/iMelodiae.conf`
 
 ## Developer aids
@@ -69,6 +81,7 @@ To add more music, click **+** in the bottom-left corner, press **Ctrl+O**, or d
 src/main.rs      app startup
 src/player.rs    Player QObject: GStreamer playbin wrapper
 src/library.rs   LibraryModel: QAbstractListModel with browser/search/sort/smart playlists
+src/lyrics.rs    Lyrics QObject: .lrc / embedded / LRCLIB lookup and LRC parsing
 src/scanner.rs   tag reading (lofty), Kind detection, artwork, library.json persistence
 qml/             the UI; main.qml wires it together
 ```

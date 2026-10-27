@@ -19,9 +19,11 @@ fn main() {
                 "qml/TrackList.qml",
                 "qml/ListHeader.qml",
                 "qml/ArtworkPane.qml",
+                "qml/OutputMenu.qml",
+                "qml/LyricsPane.qml",
             ]),
     )
     .qt_module("Quick")
-    .files(["src/player.rs", "src/library.rs"])
+    .files(["src/player.rs", "src/library.rs", "src/lyrics.rs"])
     .build();
 }

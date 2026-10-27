@@ -586,6 +586,7 @@ impl qobject::LibraryModel {
         };
         let info = serde_json::json!({
             "id": id,
+            "path": t.path,
             "title": t.title,
             "artist": t.artist,
             "album": t.album,

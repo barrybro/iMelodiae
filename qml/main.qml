@@ -34,11 +34,16 @@ Window {
         property int sourceWidth: 180
         property int browserHeight: 140
         property string columnWidths: "{}"
+        property string audioOutput: "" // device node name; empty = system default
+        property bool lyricsVisible: true
+        property int lyricsWidth: 280
+        onLyricsVisibleChanged: window.loadLyrics()
     }
 
     Player {
         id: player
         volume: settings.volume
+        output: settings.audioOutput
 
         onFinished: {
             const finishedId = window.playingId
@@ -54,6 +59,10 @@ Window {
         onErrorOccurred: message => window.flash(qsTr("Can't play this song: %1").arg(message))
     }
 
+    Lyrics {
+        id: songLyrics
+    }
+
     LibraryModel {
         id: library
         onStatusChanged: window.flash(status)
@@ -61,7 +70,8 @@ Window {
     }
 
     Timer {
-        interval: 200
+        // Fast enough for synced lyrics to land on the beat
+        interval: 100
         repeat: true
         running: player.loaded
         onTriggered: player.poll()
@@ -83,11 +93,22 @@ Window {
             player.stop()
             playingId = -1
             nowPlaying = { title: "", artist: "", album: "" }
+            songLyrics.clear()
             return
         }
         playingId = id
         nowPlaying = JSON.parse(library.trackInfo(id))
         player.playUri(library.uriOf(id))
+        loadLyrics()
+    }
+
+    // Only look lyrics up while the pane is showing, so hidden lyrics cost no network requests
+    function loadLyrics() {
+        if (playingId < 0)
+            songLyrics.clear()
+        else if (settings.lyricsVisible)
+            songLyrics.load(nowPlaying.path ?? "", nowPlaying.title ?? "", nowPlaying.artist ?? "",
+                        nowPlaying.album ?? "", nowPlaying.durationMs ?? 0)
     }
 
     function playPause() {
@@ -273,7 +294,7 @@ Window {
         Item {
             id: rightPane
             anchors.left: splitter.right
-            anchors.right: parent.right
+            anchors.right: lyricsPane.visible ? lyricsSplitter.left : parent.right
             height: parent.height
 
             Rectangle {
@@ -353,6 +374,40 @@ Window {
                 }
             }
         }
+
+        MouseArea {
+            id: lyricsSplitter
+            visible: lyricsPane.visible
+            anchors.right: lyricsPane.left
+            width: 7
+            height: parent.height
+            cursorShape: Qt.SplitHCursor
+            onPositionChanged: mouse => {
+                if (pressed)
+                    settings.lyricsWidth = Math.max(200, Math.min(480, lyricsPane.width - mouse.x + 3))
+            }
+        }
+
+        Rectangle {
+            id: lyricsPane
+            visible: settings.lyricsVisible
+            anchors.right: parent.right
+            width: Math.max(200, Math.min(480, settings.lyricsWidth))
+            height: parent.height
+            color: Theme.frame
+
+            LyricsPane {
+                anchors.fill: parent
+                anchors.margins: 1
+                lyrics: songLyrics
+                active: window.playingId >= 0
+                title: window.nowPlaying.title ?? ""
+                artist: window.nowPlaying.artist ?? ""
+                artworkSource: visible && window.playingId >= 0 ? library.artworkUrl(window.playingId) : ""
+                position: player.position
+                onSeekRequested: ms => player.seek(ms)
+            }
+        }
     }
 
     // ── Bottom bar ───────────────────────────────────────────────────────
@@ -403,6 +458,40 @@ Window {
             style: Text.Raised
             styleColor: Theme.engravedHighlight
         }
+
+        Row {
+            anchors.right: parent.right
+            anchors.rightMargin: 9
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: 6
+
+            AquaSquareButton {
+                id: outputButton
+                glyph: "output"
+                tooltip: qsTr("Audio Output: %1").arg(outputMenu.currentName)
+                checked: outputMenu.opened
+                onClicked: outputMenu.toggle()
+            }
+            AquaSquareButton {
+                glyph: "lyrics"
+                tooltip: qsTr("Show or Hide Lyrics")
+                checked: settings.lyricsVisible
+                onClicked: settings.lyricsVisible = !settings.lyricsVisible
+            }
+        }
+    }
+
+    OutputMenu {
+        id: outputMenu
+        player: player
+        // Pop up above the button, right-aligned with it
+        parent: outputButton
+        x: outputButton.width - width
+        y: -height - 6
+        onPicked: (id, name) => {
+            settings.audioOutput = id
+            window.flash(qsTr("Playing through %1").arg(name))
+        }
     }
 
     FolderDialog {
@@ -441,7 +530,8 @@ Window {
         id: screenshotTimer
         property string path: ""
         interval: 3000
-        onTriggered: window.contentItem.grabToImage(result => {
+        // Grab the root item so pop-ups in the overlay layer are included
+        onTriggered: (window.contentItem.parent ?? window.contentItem).grabToImage(result => {
             result.saveToFile(path)
             Qt.quit()
         })

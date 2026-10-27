@@ -87,6 +87,20 @@ Item {
             fill: "M1.6 12.4 A3 2.2 0 1 0 7.6 12.4 A3 2.2 0 1 0 1.6 12.4 Z M6.2 2 H7.8 V12.4 H6.2 Z M7.8 2 C8.5 5 13.5 5.5 12.2 10.5 C11.8 7.6 9.8 6.6 7.8 6.4 Z"
         },
         gear: { fill: gearPath(), oddEven: true },
+        output: {
+            // Speaker cabinet: tweeter + woofer
+            fill: "M9.1 4.4 A1.1 1.1 0 1 1 9.09 4.39 Z M8.8 10.2 A0.8 0.8 0 1 1 8.79 10.19 Z",
+            stroke: "M4.5 1.2 H11.5 A1.6 1.6 0 0 1 13.1 2.8 V13.2 A1.6 1.6 0 0 1 11.5 14.8 H4.5 A1.6 1.6 0 0 1 2.9 13.2 V2.8 A1.6 1.6 0 0 1 4.5 1.2 Z",
+            strokeWidth: 1.3,
+            stroke2: "M10.9 10.2 A2.9 2.9 0 1 1 10.89 10.19 Z",
+            strokeWidth2: 1.3
+        },
+        lyrics: {
+            // Speech bubble with quote marks
+            fill: "M4.6 4.6 H7 V6.9 L5.9 8.9 H4.9 L5.6 6.9 H4.6 Z M9 4.6 H11.4 V6.9 L10.3 8.9 H9.3 L10 6.9 H9 Z",
+            stroke: "M3 1.8 H13 A2 2 0 0 1 15 3.8 V9.6 A2 2 0 0 1 13 11.6 H7.2 L4 14.4 V11.6 H3 A2 2 0 0 1 1 9.6 V3.8 A2 2 0 0 1 3 1.8 Z",
+            strokeWidth: 1.3
+        },
         up: { fill: "M2 12 L8 4 L14 12 Z" },
         down: { fill: "M2 4 L8 12 L14 4 Z" },
         diamond: { fill: "M8 0 L16 8 L8 16 L0 8 Z" },
