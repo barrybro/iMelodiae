@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=iMelodiae
+GenericName=Music Player
+Comment=Play your FLAC, Apple Lossless and MP3 music
+Exec=imelodiae
+Icon=multimedia-audio-player
+Terminal=false
+Categories=AudioVideo;Audio;Player;

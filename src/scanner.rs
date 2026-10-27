@@ -1,0 +1,260 @@
+//! Reading audio files from disk: tags, durations, cover art and the on-disk library database.
+
+use lofty::config::ParseOptions;
+use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::mp4::{Mp4Codec, Mp4File};
+use lofty::picture::PictureType;
+use lofty::tag::{Accessor, ItemKey};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub const AUDIO_EXTENSIONS: &[&str] = &["flac", "m4a", "mp4", "alac", "mp3"];
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Track {
+    pub path: String,
+    pub title: String,
+    pub artist: String,
+    pub album_artist: String,
+    pub album: String,
+    pub genre: String,
+    pub kind: String,
+    pub track_number: u32,
+    pub disc_number: u32,
+    pub year: u32,
+    pub duration_ms: u64,
+    pub bitrate: u32,
+    pub sample_rate: u32,
+    pub size: u64,
+    pub play_count: u32,
+    pub last_played: u64,
+    pub date_added: u64,
+}
+
+pub fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+pub fn is_audio_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| AUDIO_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// iTunes-style "Kind" description for a file.
+fn kind_for(path: &Path) -> Option<String> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    let kind = match ext.as_str() {
+        "flac" => "FLAC audio file",
+        "mp3" => "MPEG audio file",
+        "m4a" | "mp4" | "alac" => {
+            let mut file = fs::File::open(path).ok()?;
+            let mp4 = Mp4File::read_from(&mut file, ParseOptions::new().read_tags(false)).ok()?;
+            match mp4.properties().codec() {
+                Some(Mp4Codec::ALAC) => "Apple Lossless audio file",
+                Some(Mp4Codec::AAC) => "AAC audio file",
+                Some(Mp4Codec::FLAC) => "FLAC audio file",
+                Some(Mp4Codec::MP3) => "MPEG audio file",
+                _ => "MPEG-4 audio file",
+            }
+        }
+        _ => return None,
+    };
+    Some(kind.to_owned())
+}
+
+/// Read a single audio file. Files without tags still get an entry named after the file.
+pub fn read_track(path: &Path) -> Option<Track> {
+    let kind = kind_for(path)?;
+    let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let fallback_title = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let mut track = Track {
+        path: path.to_string_lossy().into_owned(),
+        title: fallback_title,
+        kind,
+        size,
+        date_added: now_secs(),
+        ..Default::default()
+    };
+
+    let Ok(tagged) = lofty::read_from_path(path) else {
+        return Some(track);
+    };
+
+    let props = tagged.properties();
+    track.duration_ms = props.duration().as_millis() as u64;
+    track.bitrate = props.audio_bitrate().unwrap_or(0);
+    track.sample_rate = props.sample_rate().unwrap_or(0);
+
+    if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
+        let text = |v: Option<std::borrow::Cow<'_, str>>| {
+            v.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+        };
+        if let Some(title) = text(tag.title()) {
+            track.title = title;
+        }
+        track.artist = text(tag.artist()).unwrap_or_default();
+        track.album = text(tag.album()).unwrap_or_default();
+        track.genre = text(tag.genre()).unwrap_or_default();
+        track.album_artist = tag
+            .get_string(ItemKey::AlbumArtist)
+            .map(|s| s.trim().to_owned())
+            .unwrap_or_default();
+        track.track_number = tag.track().unwrap_or(0);
+        track.disc_number = tag.disk().unwrap_or(0);
+        track.year = tag.date().map(|d| d.year as u32).unwrap_or(0);
+    }
+
+    Some(track)
+}
+
+pub fn data_dir() -> PathBuf {
+    let dir = dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("iMelodiae");
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
+fn cache_dir() -> PathBuf {
+    let dir = dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("iMelodiae")
+        .join("artwork");
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
+fn library_file() -> PathBuf {
+    data_dir().join("library.json")
+}
+
+pub fn load_library() -> Vec<Track> {
+    fs::read(library_file())
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_library(tracks: &[Track]) {
+    let path = library_file();
+    let tmp = path.with_extension("json.tmp");
+    match serde_json::to_vec(tracks) {
+        Ok(bytes) => {
+            if fs::write(&tmp, bytes).is_ok() {
+                let _ = fs::rename(&tmp, &path);
+            }
+        }
+        Err(err) => eprintln!("iMelodiae: could not save library: {err}"),
+    }
+}
+
+/// Find album artwork for a track: embedded picture first, then cover/folder images
+/// in the track's directory. Returns a local file path.
+pub fn artwork_path(track_path: &Path) -> Option<PathBuf> {
+    if let Some(embedded) = embedded_artwork(track_path) {
+        return Some(embedded);
+    }
+    let dir = track_path.parent()?;
+    const NAMES: &[&str] = &["cover", "folder", "front", "album", "albumart"];
+    let entries = fs::read_dir(dir).ok()?;
+    let mut images: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| matches!(e.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png"))
+                .unwrap_or(false)
+        })
+        .collect();
+    images.sort();
+    images
+        .iter()
+        .find(|p| {
+            p.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| NAMES.contains(&s.to_ascii_lowercase().as_str()))
+                .unwrap_or(false)
+        })
+        .or_else(|| images.first())
+        .cloned()
+}
+
+fn embedded_artwork(track_path: &Path) -> Option<PathBuf> {
+    let mut hasher = DefaultHasher::new();
+    track_path.hash(&mut hasher);
+    let cached = cache_dir().join(format!("{:016x}", hasher.finish()));
+    if cached.exists() {
+        return Some(cached);
+    }
+
+    let tagged = lofty::read_from_path(track_path).ok()?;
+    let pictures = tagged.tags().iter().flat_map(|t| t.pictures());
+    let picture = pictures
+        .clone()
+        .find(|p| p.pic_type() == PictureType::CoverFront)
+        .or_else(|| tagged.tags().iter().flat_map(|t| t.pictures()).next())?;
+    fs::write(&cached, picture.data()).ok()?;
+    Some(cached)
+}
+
+pub fn format_time(ms: u64) -> String {
+    let secs = ms / 1000;
+    let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+/// "1,234 songs, 3.2 days, 25.41 GB" status-bar summary.
+pub fn summary(count: usize, total_ms: u64, total_bytes: u64) -> String {
+    if count == 0 {
+        return String::new();
+    }
+    let songs = if count == 1 {
+        "1 song".to_owned()
+    } else {
+        format!("{} songs", group_thousands(count))
+    };
+    let secs = total_ms as f64 / 1000.0;
+    let duration = if secs >= 86_400.0 {
+        format!("{:.1} days", secs / 86_400.0)
+    } else if secs >= 3600.0 {
+        format!("{:.1} hours", secs / 3600.0)
+    } else {
+        format!("{:.0} minutes", (secs / 60.0).ceil())
+    };
+    let mb = total_bytes as f64 / (1024.0 * 1024.0);
+    let size = if mb >= 1024.0 {
+        format!("{:.2} GB", mb / 1024.0)
+    } else {
+        format!("{mb:.1} MB")
+    };
+    format!("{songs}, {duration}, {size}")
+}
+
+fn group_thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
