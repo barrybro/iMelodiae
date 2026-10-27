@@ -44,10 +44,12 @@ Item {
     Rectangle {
         id: lcd
         anchors.fill: parent
-        radius: 8
+        radius: 5
         border.color: Theme.lcdBorder
         gradient: Gradient {
             GradientStop { position: 0.0; color: Theme.lcdTop }
+            GradientStop { position: 0.3; color: Theme.lcdUpper }
+            GradientStop { position: 0.75; color: Theme.lcdLower }
             GradientStop { position: 1.0; color: Theme.lcdBottom }
         }
         clip: true
@@ -114,13 +116,12 @@ Item {
 
             Text {
                 id: titleText
-                y: 4
+                y: 3
                 width: parent.width
                 horizontalAlignment: Text.AlignHCenter
                 text: root.message.length ? root.message : root.title
                 font.family: Theme.font
                 font.pixelSize: 12
-                font.bold: true
                 color: Theme.lcdText
                 elide: Text.ElideRight
             }
@@ -136,7 +137,7 @@ Item {
                     return lines.length ? lines[root.infoLine % lines.length] : ""
                 }
                 font.family: Theme.font
-                font.pixelSize: 11
+                font.pixelSize: 12
                 color: Theme.lcdText
                 elide: Text.ElideRight
                 Behavior on text {
@@ -159,7 +160,7 @@ Item {
                 width: 38
                 text: root.formatTime(scrub.pressed ? scrub.previewMs : root.position)
                 font.family: Theme.font
-                font.pixelSize: 10
+                font.pixelSize: 11
                 color: Theme.lcdText
             }
 
@@ -173,7 +174,7 @@ Item {
                       ? "-" + root.formatTime(root.duration - (scrub.pressed ? scrub.previewMs : root.position))
                       : root.formatTime(root.duration)
                 font.family: Theme.font
-                font.pixelSize: 10
+                font.pixelSize: 11
                 color: Theme.lcdText
                 MouseArea {
                     anchors.fill: parent
@@ -188,8 +189,8 @@ Item {
                 anchors.leftMargin: 4
                 anchors.rightMargin: 4
                 anchors.bottom: parent.bottom
-                anchors.bottomMargin: 7
-                height: 8
+                anchors.bottomMargin: 5
+                height: 9
                 color: "transparent"
                 border.color: "#3f4136"
                 radius: 1
@@ -232,24 +233,48 @@ Item {
             }
         }
 
-        // Snapback: jump to the playing song in the list
-        GlyphIcon {
-            anchors.right: parent.right
-            anchors.rightMargin: 8
-            anchors.verticalCenter: parent.verticalCenter
-            anchors.verticalCenterOffset: -6
-            width: 12
-            height: 12
-            kind: "snapback"
-            color: snapMouse.pressed ? "#000000" : "#4c4e40"
-            engraved: false
+        // iTunes 5's two little round LCD buttons: cycle the info line (left), and
+        // snapback to the playing song (right)
+        component LcdRoundButton: Rectangle {
+            id: lcdButton
+            property string glyph
+            signal clicked()
+            width: 13
+            height: 13
+            radius: 6.5
             visible: root.loaded
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.verticalCenterOffset: -4
+            color: lcdMouse.pressed ? "#4c4e44" : "#80826f"
+            GlyphIcon {
+                anchors.centerIn: parent
+                anchors.horizontalCenterOffset: lcdButton.glyph === "play" ? 0.5 : 0
+                width: 7
+                height: 7
+                kind: lcdButton.glyph
+                color: Theme.lcdUpper
+                engraved: false
+            }
             MouseArea {
-                id: snapMouse
+                id: lcdMouse
                 anchors.fill: parent
                 anchors.margins: -4
-                onClicked: root.snapbackClicked()
+                onClicked: lcdButton.clicked()
             }
+        }
+
+        LcdRoundButton {
+            anchors.left: parent.left
+            anchors.leftMargin: 7
+            glyph: "play"
+            onClicked: root.infoLine++
+        }
+
+        LcdRoundButton {
+            anchors.right: parent.right
+            anchors.rightMargin: 7
+            glyph: "snapback"
+            onClicked: root.snapbackClicked()
         }
     }
 

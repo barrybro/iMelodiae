@@ -6,7 +6,6 @@ fn main() {
             .qml_file(QmlFile::from("qml/Theme.qml").singleton(true))
             .qml_files([
                 "qml/main.qml",
-                "qml/BrushedMetal.qml",
                 "qml/AquaRoundButton.qml",
                 "qml/AquaSquareButton.qml",
                 "qml/AquaScrollBar.qml",

@@ -1,8 +1,8 @@
 # iMelodiae
 
-A music player for Linux that looks like a 2004-era jukebox: brushed metal, a
-pale-green LCD, glossy Aqua buttons, a Genre/Artist/Album browser and blue-striped
-song lists.
+A music player for Linux styled after iTunes 5 (2005). It has a smooth grey unified toolbar, a pale-green LCD,
+white round transport buttons, a rainbow Browse eye, a pale blue-grey Source list, a Genre/Artist/Album browser and
+blue-striped song lists.
 
 Built with **Rust**, **QML** (Qt 6 via [cxx-qt](https://github.com/KDAB/cxx-qt)) and **GStreamer**.
 

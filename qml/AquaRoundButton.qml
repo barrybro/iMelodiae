@@ -1,7 +1,7 @@
 import QtQuick
 import org.imelodiae
 
-// Round brushed-metal button (transport controls, Browse)
+// Round iTunes 5 toolbar button: white face, grey ring, darker when pressed
 Item {
     id: root
 
@@ -13,16 +13,16 @@ Item {
     signal clicked()
 
     implicitWidth: Math.max(diameter, labelText.implicitWidth)
-    implicitHeight: diameter + (label.length ? labelText.implicitHeight + 1 : 0)
+    implicitHeight: diameter + (label.length ? labelText.implicitHeight + 2 : 0)
 
-    // Soft drop shadow
+    // Light bevel under the ring
     Rectangle {
         x: face.x
         y: face.y + 1
         width: root.diameter
         height: root.diameter
         radius: width / 2
-        color: Qt.rgba(1, 1, 1, 0.6)
+        color: Qt.rgba(1, 1, 1, 0.45)
     }
 
     Rectangle {
@@ -31,29 +31,25 @@ Item {
         width: root.diameter
         height: root.diameter
         radius: width / 2
-        border.color: "#5e5e5e"
+        border.color: "#6c6c6c"
         border.width: 1
 
-        readonly property bool down: mouse.pressed && mouse.containsMouse
+        readonly property bool down: (mouse.pressed && mouse.containsMouse) || root.checked
+        // Lit from below, like the real thing: grey at the top, nearly white at the bottom
         gradient: Gradient {
-            GradientStop { position: 0.0; color: face.down || root.checked ? "#a9a9a9" : "#fdfdfd" }
-            GradientStop { position: 0.48; color: face.down || root.checked ? "#8f8f8f" : "#d9d9d9" }
-            GradientStop { position: 0.52; color: face.down || root.checked ? "#858585" : "#c4c4c4" }
-            GradientStop { position: 1.0; color: face.down || root.checked ? "#b4b4b4" : "#f0f0f0" }
+            GradientStop { position: 0.0; color: face.down ? "#a6a6a6" : "#dedede" }
+            GradientStop { position: 0.45; color: face.down ? "#b8b8b8" : "#ececec" }
+            GradientStop { position: 0.8; color: face.down ? "#cdcdcd" : "#f8f8f8" }
+            GradientStop { position: 1.0; color: face.down ? "#d8d8d8" : "#ffffff" }
         }
 
-        // Specular highlight
+        // Inner ring highlight
         Rectangle {
-            anchors.horizontalCenter: parent.horizontalCenter
-            y: 2
-            width: parent.width * 0.62
-            height: parent.height * 0.34
-            radius: height / 2
-            opacity: face.down ? 0.15 : 0.7
-            gradient: Gradient {
-                GradientStop { position: 0.0; color: "#ffffff" }
-                GradientStop { position: 1.0; color: "#00ffffff" }
-            }
+            anchors.fill: parent
+            anchors.margins: 1
+            radius: width / 2
+            color: "transparent"
+            border.color: Qt.rgba(1, 1, 1, face.down ? 0.2 : 0.8)
         }
 
         GlyphIcon {
@@ -62,7 +58,7 @@ Item {
             anchors.horizontalCenterOffset: kind === "play" ? 1 : 0
             width: Math.round(root.diameter * root.glyphScale)
             height: width
-            color: root.enabled ? (root.checked ? Theme.activeGlyph : "#272727") : "#8a8a8a"
+            color: root.enabled ? "#2b2b2b" : "#8a8a8a"
         }
     }
 
@@ -70,11 +66,11 @@ Item {
         id: labelText
         visible: root.label.length > 0
         anchors.top: face.bottom
-        anchors.topMargin: 1
+        anchors.topMargin: 2
         anchors.horizontalCenter: parent.horizontalCenter
         text: root.label
         font.family: Theme.font
-        font.pixelSize: Theme.smallFontSize
+        font.pixelSize: Theme.listFontSize
         color: Theme.engravedText
         style: Text.Raised
         styleColor: Theme.engravedHighlight

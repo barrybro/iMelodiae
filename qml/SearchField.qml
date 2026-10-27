@@ -92,7 +92,7 @@ Item {
         anchors.horizontalCenter: parent.horizontalCenter
         text: qsTr("Search")
         font.family: Theme.font
-        font.pixelSize: Theme.smallFontSize
+        font.pixelSize: Theme.listFontSize
         color: Theme.engravedText
         style: Text.Raised
         styleColor: Theme.engravedHighlight

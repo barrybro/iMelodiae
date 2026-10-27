@@ -11,7 +11,7 @@ Window {
     minimumWidth: 780
     minimumHeight: 460
     visible: true
-    color: Theme.metalBottom
+    color: Theme.toolbarBottom
     title: player.loaded && nowPlaying.title ? nowPlaying.title + " — iMelodiae" : "iMelodiae"
 
     property int selectedId: -1
@@ -147,60 +147,86 @@ Window {
         trackList.reveal(playingId)
     }
 
-    BrushedMetal {
-        anchors.fill: parent
-    }
-
     // ── Toolbar ──────────────────────────────────────────────────────────
-    Item {
+    // iTunes 5's unified title bar + toolbar: one smooth grey gradient
+    Rectangle {
         id: toolbar
         anchors.left: parent.left
         anchors.right: parent.right
-        height: 76
+        height: 84
+        gradient: Gradient {
+            GradientStop { position: 0.0; color: Theme.toolbarTop }
+            GradientStop { position: 0.1; color: Theme.toolbarUpper }
+            GradientStop { position: 1.0; color: Theme.toolbarBottom }
+        }
 
-        Column {
-            x: 14
-            y: 8
-            spacing: 6
+        Rectangle {
+            width: parent.width
+            height: 1
+            color: Qt.rgba(1, 1, 1, 0.6)
+        }
+        Rectangle {
+            anchors.bottom: parent.bottom
+            width: parent.width
+            height: 1
+            color: Theme.divider
+        }
 
-            Row {
-                id: transport
-                spacing: 3
-                AquaRoundButton {
-                    anchors.verticalCenter: parent.verticalCenter
-                    diameter: 31
-                    glyph: "prev"
-                    glyphScale: 0.46
-                    onClicked: window.previous()
-                }
-                AquaRoundButton {
-                    anchors.verticalCenter: parent.verticalCenter
-                    diameter: 38
-                    glyph: player.playing ? "pause" : "play"
-                    onClicked: window.playPause()
-                }
-                AquaRoundButton {
-                    anchors.verticalCenter: parent.verticalCenter
-                    diameter: 31
-                    glyph: "next"
-                    glyphScale: 0.46
-                    onClicked: window.next()
-                }
+        Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: 4
+            text: "iMelodiae"
+            font.family: Theme.font
+            font.pixelSize: 13
+            color: "#1a1a1a"
+            style: Text.Raised
+            styleColor: "#dcdcdc"
+        }
+
+        Row {
+            id: transport
+            x: 26
+            y: 31
+            spacing: 2
+
+            AquaRoundButton {
+                anchors.verticalCenter: parent.verticalCenter
+                diameter: 33
+                glyph: "prev"
+                glyphScale: 0.44
+                onClicked: window.previous()
             }
-
-            VolumeSlider {
-                width: transport.width
-                value: settings.volume
-                onMoved: value => settings.volume = value
+            AquaRoundButton {
+                anchors.verticalCenter: parent.verticalCenter
+                diameter: 40
+                glyph: player.playing ? "pause" : "play"
+                glyphScale: 0.4
+                onClicked: window.playPause()
             }
+            AquaRoundButton {
+                anchors.verticalCenter: parent.verticalCenter
+                diameter: 33
+                glyph: "next"
+                glyphScale: 0.44
+                onClicked: window.next()
+            }
+        }
+
+        VolumeSlider {
+            anchors.left: transport.right
+            anchors.leftMargin: 18
+            anchors.verticalCenter: transport.verticalCenter
+            width: 108
+            value: settings.volume
+            onMoved: value => settings.volume = value
         }
 
         LcdDisplay {
             id: lcd
-            width: Math.min(480, window.width - 2 * 250)
-            height: 56
+            width: Math.min(410, window.width - 2 * 290)
+            height: 48
             x: (window.width - width) / 2
-            y: 9
+            y: 27
             title: window.nowPlaying.title ?? ""
             artist: window.nowPlaying.artist ?? ""
             album: window.nowPlaying.album ?? ""
@@ -212,26 +238,48 @@ Window {
             onSnapbackClicked: window.snapback()
         }
 
-        Row {
+        SearchField {
+            id: search
+            anchors.right: browseButton.left
+            anchors.rightMargin: 18
+            y: 32
+            width: Math.max(100, Math.min(140, window.width - lcd.x - lcd.width - 110))
+            onTextChanged: library.search = text
+        }
+
+        AquaRoundButton {
+            id: browseButton
             anchors.right: parent.right
-            anchors.rightMargin: 14
-            y: 12
-            spacing: 12
+            anchors.rightMargin: 16
+            y: 26
+            diameter: 32
+            glyph: "colorEye"
+            glyphScale: 0.62
+            label: qsTr("Browse")
+            checked: settings.browserVisible
+            onClicked: settings.browserVisible = !settings.browserVisible
+        }
+    }
 
-            SearchField {
-                id: search
-                width: Math.max(110, Math.min(170, window.width - lcd.x - lcd.width - 90))
-                onTextChanged: library.search = text
-            }
-
-            AquaRoundButton {
-                diameter: 25
-                glyph: "eye"
-                glyphScale: 0.56
-                label: qsTr("Browse")
-                checked: settings.browserVisible
-                onClicked: settings.browserVisible = !settings.browserVisible
-            }
+    // A one-pixel dark divider with a wider invisible handle for dragging
+    component Divider: Rectangle {
+        id: divider
+        property bool vertical: true
+        property alias pressed: handle.pressed
+        signal dragged(real delta)
+        color: Theme.divider
+        width: vertical ? 1 : parent.width
+        height: vertical ? parent.height : 1
+        z: 5
+        MouseArea {
+            id: handle
+            anchors.centerIn: parent
+            width: divider.vertical ? 7 : parent.width
+            height: divider.vertical ? parent.height : 7
+            cursorShape: divider.vertical ? Qt.SplitHCursor : Qt.SplitVCursor
+            property real start
+            onPressed: mouse => start = divider.vertical ? mouse.x : mouse.y
+            onPositionChanged: mouse => divider.dragged((divider.vertical ? mouse.x : mouse.y) - start)
         }
     }
 
@@ -242,22 +290,26 @@ Window {
         anchors.bottom: bottomBar.top
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.leftMargin: 9
-        anchors.rightMargin: 9
 
         // Left column: Source list + artwork
-        Rectangle {
+        Item {
             id: leftPane
             width: Math.max(130, Math.min(340, settings.sourceWidth))
             height: parent.height
-            color: Theme.frame
 
             SourceList {
                 anchors.fill: parent
-                anchors.margins: 1
-                anchors.bottomMargin: artwork.visible ? artwork.height + 2 : 1
+                anchors.bottomMargin: artwork.visible ? artwork.height + 1 : 0
                 current: library.source
                 onPicked: source => library.source = source
+            }
+
+            Rectangle {
+                visible: artwork.visible
+                anchors.bottom: artwork.top
+                width: parent.width
+                height: 1
+                color: Theme.divider
             }
 
             ArtworkPane {
@@ -266,7 +318,6 @@ Window {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
-                anchors.margins: 1
                 height: width + 17
                 property bool nowPlayingMode: true
                 showingNowPlaying: nowPlayingMode || window.selectedId < 0
@@ -278,17 +329,10 @@ Window {
             }
         }
 
-        // Splitter between the source list and the song list
-        MouseArea {
+        Divider {
             id: splitter
             anchors.left: leftPane.right
-            width: 7
-            height: parent.height
-            cursorShape: Qt.SplitHCursor
-            onPositionChanged: mouse => {
-                if (pressed)
-                    settings.sourceWidth = Math.max(130, Math.min(340, leftPane.width + mouse.x - 3))
-            }
+            onDragged: delta => settings.sourceWidth = Math.max(130, Math.min(340, leftPane.width + delta))
         }
 
         Item {
@@ -297,132 +341,120 @@ Window {
             anchors.right: lyricsPane.visible ? lyricsSplitter.left : parent.right
             height: parent.height
 
-            Rectangle {
+            Row {
                 id: browser
                 visible: settings.browserVisible
                 width: parent.width
                 height: Math.max(80, Math.min(rightPane.height - 120, settings.browserHeight))
-                color: Theme.frame
+                readonly property real columnWidth: (width - 2) / 3
 
-                Row {
-                    anchors.fill: parent
-                    anchors.margins: 1
-                    spacing: 1
-                    readonly property real columnWidth: (width - 2) / 3
-
-                    BrowserColumn {
-                        width: parent.columnWidth
-                        height: parent.height
-                        title: qsTr("Genre")
-                        pluralNoun: qsTr("Genres")
-                        items: library.genres
-                        selected: library.genre
-                        onPicked: value => library.genre = value
-                    }
-                    BrowserColumn {
-                        width: parent.columnWidth
-                        height: parent.height
-                        title: qsTr("Artist")
-                        pluralNoun: qsTr("Artists")
-                        items: library.artists
-                        selected: library.artist
-                        onPicked: value => library.artist = value
-                    }
-                    BrowserColumn {
-                        width: parent.columnWidth
-                        height: parent.height
-                        title: qsTr("Album")
-                        pluralNoun: qsTr("Albums")
-                        items: library.albums
-                        selected: library.album
-                        onPicked: value => library.album = value
-                    }
+                BrowserColumn {
+                    width: browser.columnWidth
+                    height: parent.height
+                    title: qsTr("Genre")
+                    pluralNoun: qsTr("Genres")
+                    items: library.genres
+                    selected: library.genre
+                    onPicked: value => library.genre = value
+                }
+                Rectangle { width: 1; height: parent.height; color: Theme.headerLine }
+                BrowserColumn {
+                    width: browser.columnWidth
+                    height: parent.height
+                    title: qsTr("Artist")
+                    pluralNoun: qsTr("Artists")
+                    items: library.artists
+                    selected: library.artist
+                    onPicked: value => library.artist = value
+                }
+                Rectangle { width: 1; height: parent.height; color: Theme.headerLine }
+                BrowserColumn {
+                    width: browser.columnWidth
+                    height: parent.height
+                    title: qsTr("Album")
+                    pluralNoun: qsTr("Albums")
+                    items: library.albums
+                    selected: library.album
+                    onPicked: value => library.album = value
                 }
             }
 
-            MouseArea {
+            Divider {
                 id: browserSplitter
+                vertical: false
                 visible: browser.visible
                 anchors.top: browser.bottom
-                width: parent.width
-                height: 7
-                cursorShape: Qt.SplitVCursor
-                onPositionChanged: mouse => {
-                    if (pressed)
-                        settings.browserHeight = Math.max(80, Math.min(rightPane.height - 120, browser.height + mouse.y - 3))
-                }
+                onDragged: delta => settings.browserHeight = Math.max(80, Math.min(rightPane.height - 120, browser.height + delta))
             }
 
-            Rectangle {
+            TrackList {
+                id: trackList
                 anchors.top: browser.visible ? browserSplitter.bottom : parent.top
                 anchors.bottom: parent.bottom
                 width: parent.width
-                color: Theme.frame
-
-                TrackList {
-                    id: trackList
-                    anchors.fill: parent
-                    anchors.margins: 1
-                    tracks: library
-                    selectedId: window.selectedId
-                    playingId: window.playingId
-                    playing: player.playing
-                    widths: JSON.parse(settings.columnWidths)
-                    onSelected: id => window.selectedId = id
-                    onActivated: id => window.playId(id)
-                    onWidthsEdited: widths => settings.columnWidths = JSON.stringify(widths)
-                }
+                tracks: library
+                selectedId: window.selectedId
+                playingId: window.playingId
+                playing: player.playing
+                widths: JSON.parse(settings.columnWidths)
+                onSelected: id => window.selectedId = id
+                onActivated: id => window.playId(id)
+                onWidthsEdited: widths => settings.columnWidths = JSON.stringify(widths)
             }
         }
 
-        MouseArea {
+        Divider {
             id: lyricsSplitter
             visible: lyricsPane.visible
             anchors.right: lyricsPane.left
-            width: 7
-            height: parent.height
-            cursorShape: Qt.SplitHCursor
-            onPositionChanged: mouse => {
-                if (pressed)
-                    settings.lyricsWidth = Math.max(200, Math.min(480, lyricsPane.width - mouse.x + 3))
-            }
+            onDragged: delta => settings.lyricsWidth = Math.max(200, Math.min(480, lyricsPane.width - delta))
         }
 
-        Rectangle {
+        LyricsPane {
             id: lyricsPane
             visible: settings.lyricsVisible
             anchors.right: parent.right
             width: Math.max(200, Math.min(480, settings.lyricsWidth))
             height: parent.height
-            color: Theme.frame
-
-            LyricsPane {
-                anchors.fill: parent
-                anchors.margins: 1
-                lyrics: songLyrics
-                active: window.playingId >= 0
-                title: window.nowPlaying.title ?? ""
-                artist: window.nowPlaying.artist ?? ""
-                artworkSource: visible && window.playingId >= 0 ? library.artworkUrl(window.playingId) : ""
-                position: player.position
-                onSeekRequested: ms => player.seek(ms)
-            }
+            lyrics: songLyrics
+            active: window.playingId >= 0
+            title: window.nowPlaying.title ?? ""
+            artist: window.nowPlaying.artist ?? ""
+            artworkSource: visible && window.playingId >= 0 ? library.artworkUrl(window.playingId) : ""
+            position: player.position
+            onSeekRequested: ms => player.seek(ms)
         }
     }
 
     // ── Bottom bar ───────────────────────────────────────────────────────
-    Item {
+    Rectangle {
         id: bottomBar
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        height: 40
+        height: 42
+        gradient: Gradient {
+            GradientStop { position: 0.0; color: Theme.barTop }
+            GradientStop { position: 1.0; color: Theme.barBottom }
+        }
+
+        Rectangle {
+            width: parent.width
+            height: 1
+            color: Theme.divider
+        }
+        Rectangle {
+            y: 1
+            width: parent.width
+            height: 1
+            color: Qt.rgba(1, 1, 1, 0.35)
+        }
 
         Row {
             anchors.left: parent.left
-            anchors.leftMargin: 9
+            anchors.leftMargin: 17
             anchors.verticalCenter: parent.verticalCenter
-            spacing: 6
+            spacing: 8
 
             AquaSquareButton {
                 glyph: "plus"
@@ -461,9 +493,9 @@ Window {
 
         Row {
             anchors.right: parent.right
-            anchors.rightMargin: 9
+            anchors.rightMargin: 17
             anchors.verticalCenter: parent.verticalCenter
-            spacing: 6
+            spacing: 8
 
             AquaSquareButton {
                 id: outputButton

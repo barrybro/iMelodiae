@@ -10,29 +10,30 @@ Item {
     property string tooltip: ""
     signal clicked()
 
-    implicitWidth: 30
-    implicitHeight: 23
+    implicitWidth: 31
+    implicitHeight: 22
 
     Rectangle {
         anchors.fill: face
         anchors.topMargin: 1
         anchors.bottomMargin: -1
         radius: face.radius
-        color: Qt.rgba(1, 1, 1, 0.55)
+        color: Qt.rgba(1, 1, 1, 0.35)
     }
 
     Rectangle {
         id: face
         anchors.fill: parent
-        radius: 5
-        border.color: "#5f5f5f"
+        radius: 3
+        border.color: "#555555"
 
         readonly property bool down: (mouse.pressed && mouse.containsMouse) || root.checked
+        // iTunes 5 bottom-bar button: white at the top shading to mid grey
         gradient: Gradient {
-            GradientStop { position: 0.0; color: face.down ? "#9c9c9c" : "#fbfbfb" }
-            GradientStop { position: 0.5; color: face.down ? "#8a8a8a" : "#dcdcdc" }
-            GradientStop { position: 0.51; color: face.down ? "#808080" : "#cbcbcb" }
-            GradientStop { position: 1.0; color: face.down ? "#a5a5a5" : "#ececec" }
+            GradientStop { position: 0.0; color: face.down ? "#8c8c8c" : "#ffffff" }
+            GradientStop { position: 0.35; color: face.down ? "#a0a0a0" : "#e8e8e8" }
+            GradientStop { position: 0.6; color: face.down ? "#b2b2b2" : "#cdcdcd" }
+            GradientStop { position: 1.0; color: face.down ? "#c6c6c6" : "#a6a6a6" }
         }
 
         GlyphIcon {

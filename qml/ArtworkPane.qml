@@ -10,7 +10,7 @@ Rectangle {
     property bool showingNowPlaying: true
     signal toggleMode()
 
-    color: "white"
+    color: Theme.sourceBackground
     clip: true
     implicitHeight: width + header.height
 
@@ -19,6 +19,7 @@ Rectangle {
         width: parent.width
         text: root.showingNowPlaying ? qsTr("Now Playing") : qsTr("Selected Song")
         alignment: Text.AlignHCenter
+        sourceStyle: true
         onClicked: root.toggleMode()
     }
 
