@@ -8,6 +8,8 @@ Rectangle {
 
     property string source: ""
     property bool showingNowPlaying: true
+    // Whether there's a song to show art for (playing, or selected)
+    property bool hasSong: false
     signal toggleMode()
 
     color: Theme.sourceBackground
@@ -46,7 +48,7 @@ Rectangle {
             anchors.fill: parent
             anchors.margins: 12
             visible: art.status !== Image.Ready
-            text: root.showingNowPlaying && root.source === "" ? qsTr("Nothing\nPlaying") : qsTr("No artwork\navailable")
+            text: root.hasSong ? qsTr("No artwork\navailable") : root.showingNowPlaying ? qsTr("Nothing\nPlaying") : qsTr("No Song\nSelected")
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
             wrapMode: Text.WordWrap

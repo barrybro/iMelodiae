@@ -6,6 +6,8 @@
 //!
 //! The output device (USB DAC, Bluetooth speaker, ...) comes from a GStreamer
 //! `DeviceMonitor` and can be switched mid-song.
+//!
+//! A 10-band equalizer with preamp sits in playbin's `audio-filter` slot.
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -67,6 +69,11 @@ pub mod qobject {
         #[qinvokable]
         fn refresh_outputs(self: Pin<&mut Player>);
 
+        /// Equalizer settings: preamp and band gains in dB (bands as 10 comma-separated
+        /// values, 32 Hz to 16 kHz). Takes effect immediately, even mid-song.
+        #[qinvokable]
+        fn set_equalizer(self: Pin<&mut Player>, enabled: bool, preamp_db: f64, bands: &QString);
+
         /// The current track reached its end
         #[qsignal]
         fn finished(self: Pin<&mut Player>);
@@ -80,6 +87,8 @@ use core::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QString, QStringList};
 use gstreamer as gst;
+#[cfg(test)]
+use gstreamer::glib;
 use gstreamer::prelude::*;
 
 pub struct PlayerRust {
@@ -95,6 +104,63 @@ pub struct PlayerRust {
     monitor: Option<gst::DeviceMonitor>,
     /// (id, display name, device) for every output found by the last scan
     devices: Vec<(String, String, gst::Device)>,
+    equalizer: Equalizer,
+}
+
+const EQ_BANDS: usize = 10;
+
+#[derive(Default)]
+struct Equalizer {
+    enabled: bool,
+    preamp_db: f64,
+    bands_db: [f64; EQ_BANDS],
+    /// The `volume` (preamp) and `equalizer-10bands` elements inside playbin's audio filter
+    elements: Option<(gst::Element, gst::Element)>,
+}
+
+impl Equalizer {
+    /// audioconvert ! F32 ! volume (preamp) ! equalizer-10bands ! audioconvert
+    ///
+    /// Working in float keeps boosted bands from clipping inside the filter.
+    fn build(&mut self) -> Option<gst::Element> {
+        let make = |name: &str| gst::ElementFactory::make(name).build().ok();
+        let format = if cfg!(target_endian = "little") { "F32LE" } else { "F32BE" };
+        let convert_in = make("audioconvert")?;
+        let float_caps = gst::ElementFactory::make("capsfilter")
+            .property("caps", gst::Caps::builder("audio/x-raw").field("format", format).build())
+            .build()
+            .ok()?;
+        let preamp = make("volume")?;
+        let bands = make("equalizer-10bands")?;
+        let convert_out = make("audioconvert")?;
+
+        let bin = gst::Bin::with_name("equalizer");
+        let chain = [&convert_in, &float_caps, &preamp, &bands, &convert_out];
+        bin.add_many(chain).ok()?;
+        gst::Element::link_many(chain).ok()?;
+        let sink = gst::GhostPad::with_target(&convert_in.static_pad("sink")?).ok()?;
+        let src = gst::GhostPad::with_target(&convert_out.static_pad("src")?).ok()?;
+        bin.add_pad(&sink).ok()?;
+        bin.add_pad(&src).ok()?;
+
+        self.elements = Some((preamp, bands));
+        self.apply();
+        Some(bin.upcast())
+    }
+
+    /// Push the current settings into the running elements. Flat (all zero) settings let
+    /// both elements pass audio through untouched.
+    fn apply(&self) {
+        let Some((preamp, bands)) = &self.elements else {
+            return;
+        };
+        let preamp_db = if self.enabled { self.preamp_db } else { 0.0 };
+        preamp.set_property("volume", 10f64.powf(preamp_db / 20.0));
+        for (i, gain) in self.bands_db.iter().enumerate() {
+            let gain = if self.enabled { gain.clamp(-12.0, 12.0) } else { 0.0 };
+            bands.set_property(&format!("band{i}"), gain);
+        }
+    }
 }
 
 impl Default for PlayerRust {
@@ -111,6 +177,7 @@ impl Default for PlayerRust {
             playbin: None,
             monitor: None,
             devices: Vec::new(),
+            equalizer: Equalizer::default(),
         }
     }
 }
@@ -159,6 +226,10 @@ impl qobject::Player {
                     playbin.set_property("volume", linear_volume(self.volume));
                     if let Some(sink) = sink_override().or_else(|| self.as_mut().output_sink()) {
                         playbin.set_property("audio-sink", &sink);
+                    }
+                    match self.as_mut().rust_mut().equalizer.build() {
+                        Some(filter) => playbin.set_property("audio-filter", &filter),
+                        None => eprintln!("iMelodiae: equalizer unavailable (gst-plugins-good missing?)"),
                     }
                     self.as_mut().rust_mut().playbin = Some(playbin);
                 }
@@ -250,6 +321,18 @@ impl qobject::Player {
         }
         self.as_mut().rust_mut().volume = volume;
         self.volume_changed();
+    }
+
+    pub fn set_equalizer(mut self: Pin<&mut Self>, enabled: bool, preamp_db: f64, bands: &QString) {
+        let mut rust = self.as_mut().rust_mut();
+        let eq = &mut rust.equalizer;
+        eq.enabled = enabled;
+        eq.preamp_db = preamp_db.clamp(-12.0, 12.0);
+        let values = bands.to_string();
+        for (slot, value) in eq.bands_db.iter_mut().zip(values.split(',')) {
+            *slot = value.trim().parse().unwrap_or(0.0);
+        }
+        eq.apply();
     }
 
     pub fn refresh_outputs(mut self: Pin<&mut Self>) {
@@ -402,5 +485,69 @@ impl qobject::Player {
         if finished {
             self.finished();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RMS level (dB) of a 64 Hz tone after passing through the equalizer chain
+    fn measure(eq: &mut Equalizer) -> f64 {
+        gst::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let src = gst::ElementFactory::make("audiotestsrc")
+            .property("freq", 64.0f64)
+            .property("volume", 0.1f64)
+            .property("num-buffers", 40)
+            .build()
+            .unwrap();
+        let filter = eq.build().unwrap();
+        let level = gst::ElementFactory::make("level").build().unwrap();
+        let sink = gst::ElementFactory::make("fakesink").build().unwrap();
+        pipeline.add_many([&src, &filter, &level, &sink]).unwrap();
+        gst::Element::link_many([&src, &filter, &level, &sink]).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+
+        let bus = pipeline.bus().unwrap();
+        let mut last = f64::NAN;
+        for msg in bus.iter_timed(gst::ClockTime::from_seconds(5)) {
+            match msg.view() {
+                gst::MessageView::Element(e) => {
+                    if let Some(s) = e.structure()
+                        && s.name() == "level"
+                        && let Ok(rms) = s.get::<glib::ValueArray>("rms")
+                    {
+                        last = rms.first().and_then(|v| v.get::<f64>().ok()).unwrap_or(last);
+                    }
+                }
+                gst::MessageView::Eos(_) | gst::MessageView::Error(_) => break,
+                _ => {}
+            }
+        }
+        pipeline.set_state(gst::State::Null).unwrap();
+        last
+    }
+
+    #[test]
+    fn equalizer_boosts_and_bypasses() {
+        let mut flat = Equalizer::default();
+        let flat_db = measure(&mut flat);
+
+        let mut boosted = Equalizer { enabled: true, ..Default::default() };
+        boosted.bands_db[1] = 12.0; // the 64 Hz band
+        let boosted_db = measure(&mut boosted);
+
+        let mut off = Equalizer { enabled: false, ..Default::default() };
+        off.bands_db[1] = 12.0; // ignored while switched off
+        let off_db = measure(&mut off);
+
+        let mut preamp = Equalizer { enabled: true, preamp_db: -6.0, ..Default::default() };
+        let preamp_db = measure(&mut preamp);
+
+        println!("flat {flat_db:.1} boosted {boosted_db:.1} off {off_db:.1} preamp {preamp_db:.1}");
+        assert!(boosted_db - flat_db > 9.0);
+        assert!((off_db - flat_db).abs() < 0.5);
+        assert!((preamp_db - flat_db + 6.0).abs() < 0.5);
     }
 }

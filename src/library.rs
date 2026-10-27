@@ -36,6 +36,11 @@ pub mod qobject {
         #[qproperty(QString, summary, READ, NOTIFY)]
         #[qproperty(QString, status, READ, NOTIFY)]
         #[qproperty(bool, scanning, READ, NOTIFY)]
+        /// Bumped whenever a cover is downloaded, so artwork bindings re-check
+        #[qproperty(i32, artwork_revision, READ, NOTIFY)]
+        /// True while the list is being reset because files changed on disk, so the
+        /// view can keep its scroll position
+        #[qproperty(bool, updating, READ)]
         #[qproperty(i32, source, READ, WRITE = set_source_index, NOTIFY)]
         #[qproperty(QString, search, READ, WRITE = set_search_text, NOTIFY)]
         #[qproperty(QString, genre, READ, WRITE = set_genre_filter, NOTIFY)]
@@ -108,7 +113,8 @@ pub mod qobject {
         #[qinvokable]
         fn track_info(self: &LibraryModel, id: i32) -> QString;
 
-        /// file:// URL of the track's album artwork, or empty
+        /// file:// URL of the track's album artwork, or empty. If the song has no art,
+        /// an online lookup starts in the background and artworkRevision changes when it lands.
         #[qinvokable]
         fn artwork_url(self: &LibraryModel, id: i32) -> QString;
 
@@ -128,12 +134,15 @@ pub mod qobject {
     impl cxx_qt::Initialize for LibraryModel {}
 }
 
+use crate::coverart;
 use crate::scanner::{self, Track};
+use crate::watcher::{self, Changes};
 use core::pin::Pin;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QStringList, QVariant};
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::path::{Path, PathBuf};
 
 /// Sources in the left-hand Source list (0 is the whole Library)
@@ -157,7 +166,7 @@ const ROLES: &[&str] = &[
 ];
 const USER_ROLE: i32 = 0x0100;
 
-type TrackOrder = Box<dyn Fn(&Track, &Track) -> Ordering>;
+type TrackOrder<'a> = Box<dyn Fn(usize, usize) -> Ordering + 'a>;
 
 #[derive(Default)]
 pub struct LibraryModelRust {
@@ -166,6 +175,10 @@ pub struct LibraryModelRust {
     summary: QString,
     status: QString,
     scanning: bool,
+    updating: bool,
+    artwork_revision: i32,
+    /// Albums whose cover is being looked up right now
+    covers_in_flight: Arc<Mutex<HashSet<String>>>,
     source: i32,
     search: QString,
     genre: QString,
@@ -177,8 +190,20 @@ pub struct LibraryModelRust {
     sort_column: QString,
     sort_ascending: bool,
 
-    /// Every track; a track's id is its index here
+    /// Every track; a track's id is its index here. Deleted tracks are flagged
+    /// `removed` rather than taken out, so ids never shift while the app runs.
     tracks: Vec<Track>,
+    /// Lowercased search text and sort keys; rebuilt when tracks change
+    index: SearchIndex,
+    index_stale: bool,
+    /// Track data changed since the last refresh, so rows must be redrawn even if the
+    /// same songs are showing
+    rows_dirty: bool,
+    /// Plain copies of the browser lists, to tell whether they changed
+    browser_values: [Vec<String>; 3],
+    /// Music folders being kept in sync (shared with the watcher thread)
+    folders: Arc<Mutex<Vec<PathBuf>>>,
+    watcher: Option<notify::RecommendedWatcher>,
     /// Track ids in the current view, in display order
     view: Vec<usize>,
     shuffle_state: std::cell::Cell<u64>,
@@ -187,11 +212,28 @@ pub struct LibraryModelRust {
 impl cxx_qt::Initialize for qobject::LibraryModel {
     fn initialize(mut self: Pin<&mut Self>) {
         let tracks = scanner::load_library();
+        let folders = watcher::load_folders(&tracks);
         let mut rust = self.as_mut().rust_mut();
         rust.tracks = tracks;
+        rust.folders = Arc::new(Mutex::new(folders.clone()));
         rust.sort_ascending = true;
         rust.shuffle_state.set(scanner::now_secs() | 1);
         self.as_mut().refresh();
+
+        // Watch first, then rescan, so nothing that changes mid-scan is missed
+        let thread = self.qt_thread();
+        let shared = self.folders.clone();
+        let watcher = watcher::watch(
+            &folders,
+            move |changes| {
+                let _ = thread.queue(move |model: Pin<&mut qobject::LibraryModel>| {
+                    model.apply_changes(changes);
+                });
+            },
+            move || shared.lock().map(|f| f.clone()).unwrap_or_default(),
+        );
+        self.as_mut().rust_mut().watcher = watcher;
+        self.rescan();
     }
 }
 
@@ -201,27 +243,6 @@ fn display_artist(t: &Track) -> &str {
     } else {
         &t.artist
     }
-}
-
-fn lower_cmp(a: &str, b: &str) -> Ordering {
-    // Empty values sort last, like iTunes
-    match (a.is_empty(), b.is_empty()) {
-        (true, false) => Ordering::Greater,
-        (false, true) => Ordering::Less,
-        _ => a
-            .chars()
-            .flat_map(char::to_lowercase)
-            .cmp(b.chars().flat_map(char::to_lowercase)),
-    }
-}
-
-/// Default iTunes ordering: artist, album, disc, track number
-fn album_order(a: &Track, b: &Track) -> Ordering {
-    lower_cmp(display_artist(a), display_artist(b))
-        .then_with(|| lower_cmp(&a.album, &b.album))
-        .then(a.disc_number.cmp(&b.disc_number))
-        .then(a.track_number.cmp(&b.track_number))
-        .then_with(|| lower_cmp(&a.title, &b.title))
 }
 
 fn to_qstringlist(items: impl IntoIterator<Item = String>) -> QStringList {
@@ -258,6 +279,179 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+pub struct Filters {
+    pub search: String,
+    pub genre: String,
+    pub artist: String,
+    pub album: String,
+    pub source: i32,
+    pub sort_column: String,
+    pub ascending: bool,
+}
+
+pub struct ViewResult {
+    /// Track ids in display order
+    pub view: Vec<usize>,
+    pub genres: Vec<String>,
+    pub artists: Vec<String>,
+    pub albums: Vec<String>,
+}
+
+/// Lowercased text and sort order for every track, computed once per library change so a
+/// keystroke in the search field costs a substring scan rather than thousands of allocations
+#[derive(Default)]
+pub struct SearchIndex {
+    /// "title␁artist␁album artist␁album␁genre", lowercased; separators stop words matching across fields
+    haystack: Vec<String>,
+    title: Vec<String>,
+    /// Lowercased album artist, or artist when there's none
+    display_artist: Vec<String>,
+    artist: Vec<String>,
+    album: Vec<String>,
+    genre: Vec<String>,
+    /// Live track ids in Library order: artist, album, disc, track
+    library_order: Vec<usize>,
+    /// Each id's position in `library_order`, used to break ties in column sorts
+    rank: Vec<usize>,
+}
+
+impl SearchIndex {
+    pub fn build(tracks: &[Track]) -> Self {
+        let lower = |f: fn(&Track) -> &str| tracks.iter().map(|t| f(t).to_lowercase()).collect::<Vec<_>>();
+        let mut index = SearchIndex {
+            haystack: tracks
+                .iter()
+                .map(|t| {
+                    [&t.title, &t.artist, &t.album_artist, &t.album, &t.genre]
+                        .map(|s| s.to_lowercase())
+                        .join("\u{1}")
+                })
+                .collect(),
+            title: lower(|t| &t.title),
+            display_artist: lower(display_artist),
+            artist: lower(|t| &t.artist),
+            album: lower(|t| &t.album),
+            genre: lower(|t| &t.genre),
+            ..Default::default()
+        };
+
+        // Empty values sort last, like iTunes
+        let key = |s: &String| (s.is_empty(), s.clone());
+        let mut order: Vec<usize> = (0..tracks.len()).filter(|&i| !tracks[i].removed).collect();
+        order.sort_by_cached_key(|&i| {
+            let t = &tracks[i];
+            (
+                key(&index.display_artist[i]),
+                key(&index.album[i]),
+                t.disc_number,
+                t.track_number,
+                index.title[i].clone(),
+            )
+        });
+        index.rank = vec![usize::MAX; tracks.len()];
+        for (position, &i) in order.iter().enumerate() {
+            index.rank[i] = position;
+        }
+        index.library_order = order;
+        index
+    }
+
+    pub fn len(&self) -> usize {
+        self.rank.len()
+    }
+}
+
+/// Distinct non-empty values, sorted case-insensitively, keeping the first spelling seen
+fn distinct(ids: &[usize], lower: &[String], original: impl Fn(usize) -> String) -> Vec<String> {
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    for &i in ids {
+        let l = lower[i].as_str();
+        if !l.is_empty() {
+            seen.entry(l).or_insert(i);
+        }
+    }
+    let mut values: Vec<(&str, usize)> = seen.into_iter().collect();
+    values.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    values.into_iter().map(|(_, i)| original(i)).collect()
+}
+
+/// Apply source, search, browser and sort to the library
+pub fn compute_view(tracks: &[Track], index: &SearchIndex, f: &Filters) -> ViewResult {
+    let words: Vec<String> = f.search.to_lowercase().split_whitespace().map(str::to_owned).collect();
+    let live = || (0..tracks.len()).filter(|&i| !tracks[i].removed);
+
+    // 1. Source (Library or smart playlist)
+    let mut ids: Vec<usize> = match f.source {
+        SOURCE_RECENTLY_ADDED => {
+            let mut ids: Vec<usize> = live().collect();
+            ids.sort_by(|&a, &b| tracks[b].date_added.cmp(&tracks[a].date_added));
+            ids.truncate(25);
+            ids
+        }
+        SOURCE_TOP_PLAYED => {
+            let mut ids: Vec<usize> = live().filter(|&i| tracks[i].play_count > 0).collect();
+            ids.sort_by(|&a, &b| tracks[b].play_count.cmp(&tracks[a].play_count));
+            ids.truncate(25);
+            ids
+        }
+        SOURCE_RECENTLY_PLAYED => {
+            let mut ids: Vec<usize> = live().filter(|&i| tracks[i].last_played > 0).collect();
+            ids.sort_by(|&a, &b| tracks[b].last_played.cmp(&tracks[a].last_played));
+            ids.truncate(25);
+            ids
+        }
+        _ => index.library_order.clone(),
+    };
+
+    // 2. Search: every word must appear in one of the fields
+    if !words.is_empty() {
+        ids.retain(|&i| words.iter().all(|w| index.haystack[i].contains(w.as_str())));
+    }
+
+    // 3. Browser columns, each narrowed by the ones to its left
+    let (genre, artist, album) = (f.genre.to_lowercase(), f.artist.to_lowercase(), f.album.to_lowercase());
+    let genres = distinct(&ids, &index.genre, |i| tracks[i].genre.clone());
+    if !genre.is_empty() {
+        ids.retain(|&i| index.genre[i] == genre);
+    }
+    let artists = distinct(&ids, &index.display_artist, |i| display_artist(&tracks[i]).to_owned());
+    if !artist.is_empty() {
+        ids.retain(|&i| index.display_artist[i] == artist || index.artist[i] == artist);
+    }
+    let albums = distinct(&ids, &index.album, |i| tracks[i].album.clone());
+    if !album.is_empty() {
+        ids.retain(|&i| index.album[i] == album);
+    }
+    let mut view = ids;
+
+    // 4. Column sort, ties broken by Library order
+    let text = |v: &Vec<String>, a: usize, b: usize| {
+        (v[a].is_empty(), &v[a]).cmp(&(v[b].is_empty(), &v[b]))
+    };
+    let by: Option<TrackOrder> = match f.sort_column.as_str() {
+        "" => None,
+        "title" => Some(Box::new(|a, b| text(&index.title, a, b))),
+        "artist" => Some(Box::new(|_, _| Ordering::Equal)),
+        "album" => Some(Box::new(|a, b| text(&index.album, a, b))),
+        "genre" => Some(Box::new(|a, b| text(&index.genre, a, b))),
+        "time" => Some(Box::new(|a, b| tracks[a].duration_ms.cmp(&tracks[b].duration_ms))),
+        "kind" => Some(Box::new(|a, b| tracks[a].kind.cmp(&tracks[b].kind))),
+        "year" => Some(Box::new(|a, b| tracks[a].year.cmp(&tracks[b].year))),
+        "playCount" => Some(Box::new(|a, b| tracks[a].play_count.cmp(&tracks[b].play_count))),
+        "trackNumber" => Some(Box::new(|a, b| tracks[a].track_number.cmp(&tracks[b].track_number))),
+        "bitRate" => Some(Box::new(|a, b| tracks[a].bitrate.cmp(&tracks[b].bitrate))),
+        _ => None,
+    };
+    if let Some(by) = by {
+        view.sort_by(|&a, &b| by(a, b).then(index.rank[a].cmp(&index.rank[b])));
+    }
+    if !f.ascending {
+        view.reverse();
+    }
+
+    ViewResult { view, genres, artists, albums }
+}
+
 impl qobject::LibraryModel {
     fn track(&self, id: i32) -> Option<&Track> {
         usize::try_from(id).ok().and_then(|i| self.tracks.get(i))
@@ -265,123 +459,38 @@ impl qobject::LibraryModel {
 
     /// Rebuild the browser columns and the visible song list from the current filters.
     fn refresh(mut self: Pin<&mut Self>) {
-        let search: Vec<String> = self
-            .search
-            .to_string()
-            .to_lowercase()
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect();
-        let genre = self.genre.to_string();
-        let artist = self.artist.to_string();
-        let album = self.album.to_string();
-        let source = self.source;
-        let sort_column = self.sort_column.to_string();
-        let ascending = self.sort_ascending;
-
-        let tracks = &self.tracks;
-
-        // 1. Source (Library or smart playlist)
-        let mut source_ids: Vec<usize> = (0..tracks.len()).collect();
-        match source {
-            SOURCE_RECENTLY_ADDED => {
-                source_ids.sort_by(|&a, &b| tracks[b].date_added.cmp(&tracks[a].date_added));
-                source_ids.truncate(25);
-            }
-            SOURCE_TOP_PLAYED => {
-                source_ids.retain(|&i| tracks[i].play_count > 0);
-                source_ids.sort_by(|&a, &b| tracks[b].play_count.cmp(&tracks[a].play_count));
-                source_ids.truncate(25);
-            }
-            SOURCE_RECENTLY_PLAYED => {
-                source_ids.retain(|&i| tracks[i].last_played > 0);
-                source_ids.sort_by(|&a, &b| tracks[b].last_played.cmp(&tracks[a].last_played));
-                source_ids.truncate(25);
-            }
-            _ => source_ids.sort_by(|&a, &b| album_order(&tracks[a], &tracks[b])),
-        }
-
-        // 2. Search
-        source_ids.retain(|&i| {
-            let t = &tracks[i];
-            search.iter().all(|word| {
-                [&t.title, &t.artist, &t.album_artist, &t.album, &t.genre]
-                    .iter()
-                    .any(|field| field.to_lowercase().contains(word.as_str()))
-            })
-        });
-
-        // 3. Browser columns
-        let collect = |ids: &[usize], key: fn(&Track) -> &str| -> Vec<String> {
-            let set: BTreeSet<(String, String)> = ids
-                .iter()
-                .map(|&i| key(&tracks[i]))
-                .filter(|s| !s.is_empty())
-                .map(|s| (s.to_lowercase(), s.to_owned()))
-                .collect();
-            let mut seen = HashSet::new();
-            set.into_iter()
-                .filter(|(lower, _)| seen.insert(lower.clone()))
-                .map(|(_, s)| s)
-                .collect()
+        let filters = Filters {
+            search: self.search.to_string(),
+            genre: self.genre.to_string(),
+            artist: self.artist.to_string(),
+            album: self.album.to_string(),
+            source: self.source,
+            sort_column: self.sort_column.to_string(),
+            ascending: self.sort_ascending,
         };
-        let matches = |value: &str, filter: &str| filter.is_empty() || value.eq_ignore_ascii_case(filter);
-
-        let genres = collect(&source_ids, |t| &t.genre);
-        let genre_ids: Vec<usize> = source_ids
-            .iter()
-            .copied()
-            .filter(|&i| matches(&tracks[i].genre, &genre))
-            .collect();
-        let artists = collect(&genre_ids, display_artist);
-        let artist_ids: Vec<usize> = genre_ids
-            .iter()
-            .copied()
-            .filter(|&i| {
-                matches(display_artist(&tracks[i]), &artist) || matches(&tracks[i].artist, &artist)
-            })
-            .collect();
-        let albums = collect(&artist_ids, |t| &t.album);
-        let mut view: Vec<usize> = artist_ids
-            .into_iter()
-            .filter(|&i| matches(&tracks[i].album, &album))
-            .collect();
-
-        // 4. Column sort
-        if !sort_column.is_empty() {
-            let by: TrackOrder = match sort_column.as_str() {
-                "title" => Box::new(|a, b| lower_cmp(&a.title, &b.title)),
-                "time" => Box::new(|a, b| a.duration_ms.cmp(&b.duration_ms)),
-                "artist" => Box::new(album_order),
-                "album" => Box::new(|a, b| {
-                    lower_cmp(&a.album, &b.album).then_with(|| album_order(a, b))
-                }),
-                "genre" => Box::new(|a, b| {
-                    lower_cmp(&a.genre, &b.genre).then_with(|| album_order(a, b))
-                }),
-                "kind" => Box::new(|a, b| a.kind.cmp(&b.kind).then_with(|| album_order(a, b))),
-                "year" => Box::new(|a, b| a.year.cmp(&b.year).then_with(|| album_order(a, b))),
-                "playCount" => Box::new(|a, b| a.play_count.cmp(&b.play_count)),
-                "trackNumber" => Box::new(|a, b| {
-                    a.track_number.cmp(&b.track_number).then_with(|| album_order(a, b))
-                }),
-                "bitRate" => Box::new(|a, b| a.bitrate.cmp(&b.bitrate)),
-                _ => Box::new(|_, _| Ordering::Equal),
-            };
-            view.sort_by(|&a, &b| by(&tracks[a], &tracks[b]));
+        if self.index_stale || self.index.len() != self.tracks.len() {
+            let index = SearchIndex::build(&self.tracks);
+            let mut rust = self.as_mut().rust_mut();
+            rust.index = index;
+            rust.index_stale = false;
         }
-        if !ascending {
-            view.reverse();
-        }
-
+        let tracks = &self.tracks;
+        let ViewResult { view, genres, artists, albums } = compute_view(tracks, &self.index, &filters);
         let total_ms = view.iter().map(|&i| tracks[i].duration_ms).sum();
         let total_bytes = view.iter().map(|&i| tracks[i].size).sum();
         let summary = QString::from(scanner::summary(view.len(), total_ms, total_bytes));
-        let total = tracks.len() as i32;
+        let total = tracks.iter().filter(|t| !t.removed).count() as i32;
 
-        self.as_mut().begin_reset_model();
-        self.as_mut().rust_mut().view = view;
-        self.as_mut().end_reset_model();
+        // Resetting the model rebuilds every visible row in QML, which is the slow part on
+        // older machines, so skip it when the same songs are showing (e.g. typing more
+        // letters of a search that already matches just these songs)
+        if self.rows_dirty || self.view != view {
+            self.as_mut().begin_reset_model();
+            let mut rust = self.as_mut().rust_mut();
+            rust.view = view;
+            rust.rows_dirty = false;
+            self.as_mut().end_reset_model();
+        }
 
         let count = self.view.len() as i32;
         if self.count != count {
@@ -392,14 +501,26 @@ impl qobject::LibraryModel {
             self.as_mut().rust_mut().total_count = total;
             self.as_mut().total_count_changed();
         }
-        self.as_mut().rust_mut().summary = summary;
-        self.as_mut().summary_changed();
-        self.as_mut().rust_mut().genres = to_qstringlist(genres);
-        self.as_mut().genres_changed();
-        self.as_mut().rust_mut().artists = to_qstringlist(artists);
-        self.as_mut().artists_changed();
-        self.as_mut().rust_mut().albums = to_qstringlist(albums);
-        self.as_mut().albums_changed();
+        if self.summary != summary {
+            self.as_mut().rust_mut().summary = summary;
+            self.as_mut().summary_changed();
+        }
+        // Each browser list rebuilds its column in QML, so only send ones that changed
+        if self.browser_values[0] != genres {
+            self.as_mut().rust_mut().genres = to_qstringlist(genres.iter().cloned());
+            self.as_mut().rust_mut().browser_values[0] = genres;
+            self.as_mut().genres_changed();
+        }
+        if self.browser_values[1] != artists {
+            self.as_mut().rust_mut().artists = to_qstringlist(artists.iter().cloned());
+            self.as_mut().rust_mut().browser_values[1] = artists;
+            self.as_mut().artists_changed();
+        }
+        if self.browser_values[2] != albums {
+            self.as_mut().rust_mut().albums = to_qstringlist(albums.iter().cloned());
+            self.as_mut().rust_mut().browser_values[2] = albums;
+            self.as_mut().albums_changed();
+        }
     }
 
     fn set_status_text(mut self: Pin<&mut Self>, status: String) {
@@ -485,8 +606,98 @@ impl qobject::LibraryModel {
         self.refresh();
     }
 
+    /// Merge changes found on disk (by the startup rescan or the folder watcher)
+    fn apply_changes(mut self: Pin<&mut Self>, changes: Changes) {
+        if changes.is_empty() {
+            return;
+        }
+        let (mut added, mut removed) = (0usize, 0usize);
+        let mut rust = self.as_mut().rust_mut();
+        let mut index: HashMap<String, usize> = rust
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.removed)
+            .map(|(i, t)| (t.path.clone(), i))
+            .collect();
+
+        for mut track in changes.upserts {
+            match index.get(&track.path) {
+                Some(&i) => {
+                    // Re-read tags, but keep the listening history
+                    let old = &rust.tracks[i];
+                    track.play_count = old.play_count;
+                    track.last_played = old.last_played;
+                    track.date_added = old.date_added;
+                    rust.tracks[i] = track;
+                }
+                None => {
+                    index.insert(track.path.clone(), rust.tracks.len());
+                    rust.tracks.push(track);
+                    added += 1;
+                }
+            }
+        }
+        for (path, mtime) in changes.touched {
+            if let Some(&i) = index.get(&path) {
+                rust.tracks[i].mtime = mtime;
+            }
+        }
+        for path in &changes.removed {
+            if let Some(&i) = index.get(path) {
+                rust.tracks[i].removed = true;
+                removed += 1;
+            }
+        }
+        for dir in &changes.removed_dirs {
+            let prefix = format!("{}/", dir.trim_end_matches('/'));
+            for track in rust.tracks.iter_mut().filter(|t| !t.removed && t.path.starts_with(&prefix)) {
+                track.removed = true;
+                removed += 1;
+            }
+        }
+
+        scanner::save_library(&rust.tracks);
+        rust.index_stale = true;
+        rust.rows_dirty = true;
+        rust.updating = true;
+        self.as_mut().refresh();
+        self.as_mut().rust_mut().updating = false;
+
+        if !self.scanning && (added > 0 || removed > 0) {
+            let songs = |n: usize| if n == 1 { "1 song".to_owned() } else { format!("{n} songs") };
+            let msg = match (added, removed) {
+                (a, 0) => format!("Added {}", songs(a)),
+                (0, r) => format!("Removed {}", songs(r)),
+                (a, r) => format!("Added {}, removed {}", songs(a), songs(r)),
+            };
+            self.set_status_text(msg);
+        }
+    }
+
+    /// Check the music folders for anything that changed while the app was closed
+    fn rescan(self: Pin<&mut Self>) {
+        let folders = self.folders.lock().map(|f| f.clone()).unwrap_or_default();
+        if folders.is_empty() {
+            return;
+        }
+        let known: HashMap<String, u64> = self
+            .tracks
+            .iter()
+            .filter(|t| !t.removed)
+            .map(|t| (t.path.clone(), t.mtime))
+            .collect();
+        let thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let changes = watcher::rescan(&folders, &known);
+            let _ = thread.queue(move |model: Pin<&mut qobject::LibraryModel>| {
+                model.apply_changes(changes);
+            });
+        });
+    }
+
     pub fn import_default_folder(self: Pin<&mut Self>) {
-        if !self.tracks.is_empty() || self.scanning {
+        if self.tracks.iter().any(|t| !t.removed) || self.scanning {
             return;
         }
         if let Some(music) = dirs::audio_dir().or_else(|| dirs::home_dir().map(|h| h.join("Music")))
@@ -506,7 +717,14 @@ impl qobject::LibraryModel {
             return;
         }
 
-        let known: HashSet<String> = self.tracks.iter().map(|t| t.path.clone()).collect();
+        // Keep this folder in sync from now on
+        let is_new = self.folders.lock().map(|mut f| watcher::add_folder(&mut f, &root)).unwrap_or(false);
+        if is_new && let Some(w) = self.as_mut().rust_mut().watcher.as_mut() {
+            watcher::watch_folder(w, &root);
+        }
+
+        let known: HashSet<String> =
+            self.tracks.iter().filter(|t| !t.removed).map(|t| t.path.clone()).collect();
         self.as_mut().rust_mut().scanning = true;
         self.as_mut().scanning_changed();
         self.as_mut().set_status_text("Importing…".to_owned());
@@ -535,9 +753,9 @@ impl qobject::LibraryModel {
                     let chunk = std::mem::take(&mut batch);
                     let done = n + 1;
                     let _ = thread.queue(move |mut model: Pin<&mut qobject::LibraryModel>| {
-                        model.as_mut().rust_mut().tracks.extend(chunk);
                         model.as_mut().set_status_text(format!("Importing {done} of {total}…"));
-                        model.refresh();
+                        // Merge by path, in case the folder watcher already picked some up
+                        model.apply_changes(Changes { upserts: chunk, ..Default::default() });
                     });
                 }
             }
@@ -599,11 +817,67 @@ impl qobject::LibraryModel {
     }
 
     pub fn artwork_url(&self, id: i32) -> QString {
-        self.track(id)
-            .and_then(|t| scanner::artwork_path(Path::new(&t.path)))
-            .and_then(|p| gstreamer::glib::filename_to_uri(&p, None).ok())
-            .map(|uri| QString::from(uri.as_str()))
-            .unwrap_or_default()
+        let Some(track) = self.track(id) else {
+            return QString::default();
+        };
+        let artist = display_artist(track);
+        let found = scanner::artwork_path(Path::new(&track.path))
+            .or_else(|| coverart::cached_cover(artist, &track.album));
+        match found {
+            Some(path) => gstreamer::glib::filename_to_uri(&path, None)
+                .map(|uri| QString::from(uri.as_str()))
+                .unwrap_or_default(),
+            None => {
+                self.look_up_cover(track);
+                QString::default()
+            }
+        }
+    }
+
+    /// Start an online cover lookup for the track's album, unless one is running or
+    /// recently came up empty
+    fn look_up_cover(&self, track: &Track) {
+        let Some(folder) = Path::new(&track.path).parent() else {
+            return;
+        };
+        // Only write cover.jpg into a folder that holds this one album, so a folder of
+        // assorted singles doesn't end up showing one album's cover for everything
+        let album = track.album.to_lowercase();
+        let write_to_folder = self
+            .tracks
+            .iter()
+            .filter(|t| !t.removed && Path::new(&t.path).parent() == Some(folder))
+            .all(|t| t.album.to_lowercase() == album);
+        let query = coverart::AlbumQuery {
+            artist: display_artist(track).to_owned(),
+            album: track.album.clone(),
+            year: track.year,
+            folder: folder.to_path_buf(),
+            write_to_folder,
+        };
+        if query.album.trim().is_empty() || coverart::recently_missing(&query) {
+            return;
+        }
+        let key = query.key();
+        let in_flight = self.covers_in_flight.clone();
+        if !in_flight.lock().map(|mut f| f.insert(key.clone())).unwrap_or(false) {
+            return;
+        }
+
+        let thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let saved = coverart::fetch_and_save(&query);
+            if let Ok(mut f) = in_flight.lock() {
+                f.remove(&key);
+            }
+            if saved {
+                let _ = thread.queue(|mut model: Pin<&mut qobject::LibraryModel>| {
+                    let next = model.artwork_revision + 1;
+                    model.as_mut().rust_mut().artwork_revision = next;
+                    model.artwork_revision_changed();
+                });
+            }
+        });
     }
 
     fn random_row(&self, len: usize) -> usize {
@@ -658,6 +932,7 @@ impl qobject::LibraryModel {
         };
         track.play_count += 1;
         track.last_played = scanner::now_secs();
+        rust.rows_dirty = true;
         scanner::save_library(&self.tracks);
         // Only smart playlists and the Play Count column depend on this
         self.refresh();
@@ -690,7 +965,8 @@ impl qobject::LibraryModel {
                 if t.bitrate == 0 {
                     QVariant::from(&QString::default())
                 } else {
-                    QVariant::from(&QString::from(format!("{} kbps", t.bitrate)))
+                    let kbps = scanner::group_thousands(t.bitrate as usize);
+                    QVariant::from(&QString::from(format!("{kbps} kbps")))
                 }
             }
             Some("sampleRate") => {
@@ -710,5 +986,143 @@ impl qobject::LibraryModel {
 
     pub fn row_count(&self, _parent: &QModelIndex) -> i32 {
         self.view.len() as i32
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    /// Times every keystroke of a few searches against a real library.json:
+    /// `IMELODIAE_BENCH_LIBRARY=path cargo test --release bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn search_keystrokes() {
+        let Ok(path) = std::env::var("IMELODIAE_BENCH_LIBRARY") else {
+            return;
+        };
+        let tracks: Vec<Track> = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let started = std::time::Instant::now();
+        let index = SearchIndex::build(&tracks);
+        println!("index built in {:.1} ms", started.elapsed().as_secs_f64() * 1000.0);
+        let filters = |search: &str| Filters {
+            search: search.to_owned(),
+            genre: String::new(),
+            artist: String::new(),
+            album: String::new(),
+            source: 0,
+            sort_column: String::new(),
+            ascending: true,
+        };
+        for q in ["weezer", "beatles abbey", "rock", "love", "the", "a", "bowie heroes", "zzzz"] {
+            println!("count {q} {}", compute_view(&tracks, &index, &filters(q)).view.len());
+        }
+        let mut worst = std::time::Duration::ZERO;
+        let mut total = std::time::Duration::ZERO;
+        let mut keystrokes = 0;
+        for phrase in ["weezer", "beatles abbey"] {
+            for end in 0..=phrase.len() {
+                let started = std::time::Instant::now();
+                let result = compute_view(&tracks, &index, &filters(&phrase[..end]));
+                let took = started.elapsed();
+                std::hint::black_box(result.view.len());
+                worst = worst.max(took);
+                total += took;
+                keystrokes += 1;
+            }
+        }
+        println!(
+            "{} tracks: average {:.1} ms per keystroke, worst {:.1} ms",
+            tracks.len(),
+            total.as_secs_f64() * 1000.0 / keystrokes as f64,
+            worst.as_secs_f64() * 1000.0
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(title: &str, artist: &str, album: &str, genre: &str, number: u32) -> Track {
+        Track {
+            title: title.into(),
+            artist: artist.into(),
+            album: album.into(),
+            genre: genre.into(),
+            track_number: number,
+            ..Default::default()
+        }
+    }
+
+    fn filters(search: &str) -> Filters {
+        Filters {
+            search: search.into(),
+            genre: String::new(),
+            artist: String::new(),
+            album: String::new(),
+            source: 0,
+            sort_column: String::new(),
+            ascending: true,
+        }
+    }
+
+    fn library() -> Vec<Track> {
+        let mut removed = track("Gone", "Weezer", "Pinkerton", "Rock", 1);
+        removed.removed = true;
+        vec![
+            track("Say It Ain't So", "Weezer", "Weezer (Blue Album)", "Rock", 7),
+            track("Buddy Holly", "Weezer", "Weezer (Blue Album)", "Rock", 4),
+            track("Heroes", "David Bowie", "Best of Bowie", "Rock", 10),
+            track("Clair de Lune", "Debussy", "Suite bergamasque", "Classical", 3),
+            track("Untitled", "", "", "", 0),
+            removed,
+        ]
+    }
+
+    #[test]
+    fn library_order_and_search() {
+        let tracks = library();
+        let index = SearchIndex::build(&tracks);
+        let titles = |r: &ViewResult| r.view.iter().map(|&i| tracks[i].title.as_str()).collect::<Vec<_>>();
+
+        // Artist, album, track number; untagged last; removed tracks never shown
+        let all = compute_view(&tracks, &index, &filters(""));
+        assert_eq!(titles(&all), ["Heroes", "Clair de Lune", "Buddy Holly", "Say It Ain't So", "Untitled"]);
+        assert_eq!(all.genres, ["Classical", "Rock"]);
+
+        // Every word must match, case-insensitively, in any field
+        assert_eq!(titles(&compute_view(&tracks, &index, &filters("WEEZER blue"))), ["Buddy Holly", "Say It Ain't So"]);
+        assert_eq!(titles(&compute_view(&tracks, &index, &filters("rock heroes"))), ["Heroes"]);
+        // ...but a word can't straddle two fields
+        assert!(compute_view(&tracks, &index, &filters("holly weezer")).view.len() == 1);
+        assert!(compute_view(&tracks, &index, &filters("hollyweezer")).view.is_empty());
+    }
+
+    #[test]
+    fn browser_and_sorting() {
+        let tracks = library();
+        let index = SearchIndex::build(&tracks);
+        let titles = |r: &ViewResult| r.view.iter().map(|&i| tracks[i].title.as_str()).collect::<Vec<_>>();
+
+        let mut f = filters("");
+        f.genre = "rock".into(); // case-insensitive
+        let rock = compute_view(&tracks, &index, &f);
+        assert_eq!(rock.artists, ["David Bowie", "Weezer"]);
+        assert_eq!(titles(&rock), ["Heroes", "Buddy Holly", "Say It Ain't So"]);
+
+        f.artist = "Weezer".into();
+        let weezer = compute_view(&tracks, &index, &f);
+        assert_eq!(weezer.albums, ["Weezer (Blue Album)"]);
+
+        // Sort by title, then reverse
+        let mut f = filters("");
+        f.sort_column = "title".into();
+        assert_eq!(
+            titles(&compute_view(&tracks, &index, &f)),
+            ["Buddy Holly", "Clair de Lune", "Heroes", "Say It Ain't So", "Untitled"]
+        );
+        f.ascending = false;
+        assert_eq!(titles(&compute_view(&tracks, &index, &f))[0], "Untitled");
     }
 }

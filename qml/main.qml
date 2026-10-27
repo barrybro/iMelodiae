@@ -38,6 +38,13 @@ Window {
         property bool lyricsVisible: true
         property int lyricsWidth: 280
         onLyricsVisibleChanged: window.loadLyrics()
+        property bool eqEnabled: false
+        property real eqPreamp: 0
+        property string eqBands: "[0,0,0,0,0,0,0,0,0,0]"
+        property string eqPreset: "Flat"
+        onEqEnabledChanged: window.applyEqualizer()
+        onEqPreampChanged: window.applyEqualizer()
+        onEqBandsChanged: window.applyEqualizer()
     }
 
     Player {
@@ -109,6 +116,10 @@ Window {
         else if (settings.lyricsVisible)
             songLyrics.load(nowPlaying.path ?? "", nowPlaying.title ?? "", nowPlaying.artist ?? "",
                         nowPlaying.album ?? "", nowPlaying.durationMs ?? 0)
+    }
+
+    function applyEqualizer() {
+        player.setEqualizer(settings.eqEnabled, settings.eqPreamp, JSON.parse(settings.eqBands).join(","))
     }
 
     function playPause() {
@@ -321,9 +332,11 @@ Window {
                 height: width + 17
                 property bool nowPlayingMode: true
                 showingNowPlaying: nowPlayingMode || window.selectedId < 0
+                readonly property int songId: showingNowPlaying ? window.playingId : window.selectedId
+                hasSong: songId >= 0
                 source: {
-                    const id = showingNowPlaying ? window.playingId : window.selectedId
-                    return id >= 0 && visible ? library.artworkUrl(id) : ""
+                    void library.artworkRevision // re-check when a cover is downloaded
+                    return songId >= 0 && visible ? library.artworkUrl(songId) : ""
                 }
                 onToggleMode: nowPlayingMode = !nowPlayingMode
             }
@@ -420,7 +433,10 @@ Window {
             active: window.playingId >= 0
             title: window.nowPlaying.title ?? ""
             artist: window.nowPlaying.artist ?? ""
-            artworkSource: visible && window.playingId >= 0 ? library.artworkUrl(window.playingId) : ""
+            artworkSource: {
+                void library.artworkRevision
+                return visible && window.playingId >= 0 ? library.artworkUrl(window.playingId) : ""
+            }
             position: player.position
             onSeekRequested: ms => player.seek(ms)
         }
@@ -510,6 +526,29 @@ Window {
                 checked: settings.lyricsVisible
                 onClicked: settings.lyricsVisible = !settings.lyricsVisible
             }
+            AquaSquareButton {
+                glyph: "equalizer"
+                tooltip: qsTr("Show or Hide Equalizer")
+                checked: equalizer.opened
+                onClicked: equalizer.opened ? equalizer.close() : equalizer.open()
+            }
+        }
+    }
+
+    EqualizerPanel {
+        id: equalizer
+        // First shown just above the bottom-right corner; drag the title bar to move it
+        x: window.width - width - 16
+        y: window.height - 42 - height - 10
+        enabled_: settings.eqEnabled
+        preamp: settings.eqPreamp
+        bands: JSON.parse(settings.eqBands)
+        preset: settings.eqPreset
+        onEdited: (enabled, preamp, bands, preset) => {
+            settings.eqPreset = preset
+            settings.eqPreamp = preamp
+            settings.eqBands = JSON.stringify(bands)
+            settings.eqEnabled = enabled
         }
     }
 
@@ -571,6 +610,7 @@ Window {
 
     Component.onCompleted: {
         trackList.focusList()
+        applyEqualizer()
         for (const arg of Qt.application.arguments) {
             if (arg.startsWith("--screenshot=")) {
                 screenshotTimer.path = arg.substring(13)

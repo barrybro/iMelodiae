@@ -30,6 +30,7 @@ Rectangle {
         { role: "album", title: qsTr("Album"), width: 150 },
         { role: "genre", title: qsTr("Genre"), width: 90 },
         { role: "kind", title: qsTr("Kind"), width: 140 },
+        { role: "bitRate", title: qsTr("Bit Rate"), width: 80, align: Text.AlignRight },
         { role: "playCount", title: qsTr("Play Count"), width: 72, align: Text.AlignRight }
     ]
 
@@ -43,6 +44,19 @@ Rectangle {
             return Math.max(widths.title ?? 140, fitted)
         }
         return col.fixed ? col.width : (widths[col.role] ?? col.width)
+    }
+
+    // Every column's x and width, computed once per resize rather than in every cell
+    readonly property var layout: {
+        void widths; void list.width
+        let x = 0
+        const out = []
+        for (const c of columns) {
+            const w = widthOf(c)
+            out.push({ x: x, width: w })
+            x += w
+        }
+        return out
     }
 
     readonly property real totalWidth: {
@@ -139,6 +153,9 @@ Rectangle {
         clip: true
         model: root.tracks
         reuseItems: true
+        // Don't pre-build off-screen rows: every search rebuilds the list, and scrolling
+        // reuses rows anyway
+        cacheBuffer: 0
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.AutoFlickIfNeeded
         contentWidth: root.totalWidth
@@ -170,6 +187,8 @@ Rectangle {
             }
         }
 
+        // Kept deliberately light: on an older machine, rebuilding rows is the slowest
+        // part of searching, so each row is one rectangle with plain text cells
         delegate: Rectangle {
             id: row
             required property var model
@@ -181,46 +200,41 @@ Rectangle {
             height: 17
             color: isSelected ? Theme.selection : (index % 2 ? Theme.rowOdd : Theme.rowEven)
 
-            Row {
-                height: parent.height
-                Repeater {
-                    model: root.columns
-                    delegate: Item {
-                        id: cellItem
-                        required property var modelData
-                        width: root.widthOf(modelData)
-                        height: row.height
+            component Cell: Text {
+                property int column
+                x: root.layout[column].x + 5
+                width: root.layout[column].width - 11
+                height: row.height
+                verticalAlignment: Text.AlignVCenter
+                textFormat: Text.PlainText
+                font.family: Theme.font
+                font.pixelSize: Theme.listFontSize
+                color: row.isSelected ? Theme.selectionText : Theme.text
+                elide: Text.ElideRight
+            }
+            // One cell per entry in `columns` after the status column, in the same order
+            Cell { column: 1; text: row.model.title }
+            Cell { column: 2; text: row.model.time; horizontalAlignment: Text.AlignRight }
+            Cell { column: 3; text: row.model.artist }
+            Cell { column: 4; text: row.model.album }
+            Cell { column: 5; text: row.model.genre }
+            Cell { column: 6; text: row.model.kind }
+            Cell { column: 7; text: row.model.bitRate; horizontalAlignment: Text.AlignRight }
+            Cell { column: 8; text: row.model.playCount; horizontalAlignment: Text.AlignRight }
 
-                        GlyphIcon {
-                            visible: cellItem.modelData.role === "status" && row.isPlaying
-                            anchors.centerIn: parent
-                            width: 13
-                            height: 11
-                            kind: root.playing ? "speaker" : "speakerLow"
-                            color: row.isSelected ? "white" : "#1a1a1a"
-                            engraved: false
-                        }
-
-                        Text {
-                            visible: cellItem.modelData.role !== "status"
-                            anchors.fill: parent
-                            anchors.leftMargin: 5
-                            anchors.rightMargin: 6
-                            verticalAlignment: Text.AlignVCenter
-                            horizontalAlignment: cellItem.modelData.align ?? Text.AlignLeft
-                            text: visible ? (row.model[cellItem.modelData.role] ?? "") : ""
-                            font.family: Theme.font
-                            font.pixelSize: Theme.listFontSize
-                            color: row.isSelected ? Theme.selectionText : Theme.text
-                            elide: Text.ElideRight
-                        }
-
-                        Rectangle {
-                            anchors.right: parent.right
-                            width: 1
-                            height: parent.height
-                            color: row.isSelected ? "#5a8fe0" : Theme.gridLine
-                        }
+            // Speaker icon, only built for the playing song
+            Loader {
+                active: row.isPlaying
+                width: root.layout[0].width
+                height: row.height
+                sourceComponent: Item {
+                    GlyphIcon {
+                        anchors.centerIn: parent
+                        width: 13
+                        height: 11
+                        kind: root.playing ? "speaker" : "speakerLow"
+                        color: row.isSelected ? "white" : "#1a1a1a"
+                        engraved: false
                     }
                 }
             }
@@ -232,6 +246,20 @@ Rectangle {
                     root.selected(row.model.trackId)
                 }
                 onDoubleClicked: root.activated(row.model.trackId)
+            }
+        }
+
+        // Column grid lines, drawn once over the whole list instead of in every cell
+        Repeater {
+            model: root.layout
+            delegate: Rectangle {
+                required property var modelData
+                parent: list
+                z: 1
+                x: modelData.x + modelData.width - 1 - list.contentX
+                width: 1
+                height: Math.min(list.height, list.contentHeight - list.contentY)
+                color: Qt.rgba(0, 0, 0, 0.13)
             }
         }
 
@@ -262,7 +290,7 @@ Rectangle {
                 list.savedY = list.contentY
             }
             function onModelReset() {
-                const keep = root.preserveScroll || root.tracks.scanning
+                const keep = root.preserveScroll || root.tracks.scanning || root.tracks.updating
                 root.preserveScroll = false
                 Qt.callLater(() => {
                     if (keep) {

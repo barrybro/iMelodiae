@@ -108,6 +108,12 @@ Item {
             stroke: "M3 1.8 H13 A2 2 0 0 1 15 3.8 V9.6 A2 2 0 0 1 13 11.6 H7.2 L4 14.4 V11.6 H3 A2 2 0 0 1 1 9.6 V3.8 A2 2 0 0 1 3 1.8 Z",
             strokeWidth: 1.3
         },
+        equalizer: {
+            // Three slider tracks with knobs at different heights
+            stroke: "M4 1.5 V14.5 M8 1.5 V14.5 M12 1.5 V14.5",
+            strokeWidth: 1.3,
+            fill: "M2.2 3.6 H5.8 V6.4 H2.2 Z M6.2 9.2 H9.8 V12 H6.2 Z M10.2 5.2 H13.8 V8 H10.2 Z"
+        },
         up: { fill: "M2 12 L8 4 L14 12 Z" },
         down: { fill: "M2 4 L8 12 L14 4 Z" },
         diamond: { fill: "M8 0 L16 8 L8 16 L0 8 Z" },

@@ -20,6 +20,7 @@ fn main() {
                 "qml/ArtworkPane.qml",
                 "qml/OutputMenu.qml",
                 "qml/LyricsPane.qml",
+                "qml/EqualizerPanel.qml",
             ]),
     )
     .qt_module("Quick")

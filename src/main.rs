@@ -1,7 +1,9 @@
+mod coverart;
 mod library;
 mod lyrics;
 mod player;
 mod scanner;
+mod watcher;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QString, QUrl};
 

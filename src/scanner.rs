@@ -33,11 +33,26 @@ pub struct Track {
     pub play_count: u32,
     pub last_played: u64,
     pub date_added: u64,
+    /// File modification time (seconds) when the tags were last read; 0 = unknown
+    pub mtime: u64,
+    /// Deleted from disk this session. Kept in memory so track ids stay stable,
+    /// never written to library.json.
+    #[serde(skip)]
+    pub removed: bool,
 }
 
 pub fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+pub fn file_mtime(path: &Path) -> u64 {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
@@ -86,6 +101,7 @@ pub fn read_track(path: &Path) -> Option<Track> {
         kind,
         size,
         date_added: now_secs(),
+        mtime: file_mtime(path),
         ..Default::default()
     };
 
@@ -151,7 +167,8 @@ pub fn load_library() -> Vec<Track> {
 pub fn save_library(tracks: &[Track]) {
     let path = library_file();
     let tmp = path.with_extension("json.tmp");
-    match serde_json::to_vec(tracks) {
+    let live: Vec<&Track> = tracks.iter().filter(|t| !t.removed).collect();
+    match serde_json::to_vec(&live) {
         Ok(bytes) => {
             if fs::write(&tmp, bytes).is_ok() {
                 let _ = fs::rename(&tmp, &path);
@@ -247,7 +264,7 @@ pub fn summary(count: usize, total_ms: u64, total_bytes: u64) -> String {
     format!("{songs}, {duration}, {size}")
 }
 
-fn group_thousands(n: usize) -> String {
+pub fn group_thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
