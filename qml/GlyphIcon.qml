@@ -117,6 +117,18 @@ Item {
         up: { fill: "M2 12 L8 4 L14 12 Z" },
         down: { fill: "M2 4 L8 12 L14 4 Z" },
         diamond: { fill: "M8 0 L16 8 L8 16 L0 8 Z" },
+        chevron: {
+            stroke: "M4.5 1.5 L11 8 L4.5 14.5",
+            strokeWidth: 2.6
+        },
+        miniplayer: {
+            // A click-wheel iPod: body, screen and wheel
+            stroke: "M4.6 0.8 H11.4 A1.6 1.6 0 0 1 13 2.4 V13.6 A1.6 1.6 0 0 1 11.4 15.2 H4.6 A1.6 1.6 0 0 1 3 13.6 V2.4 A1.6 1.6 0 0 1 4.6 0.8 Z",
+            strokeWidth: 1.3,
+            fill: "M5.2 2.9 H10.8 V7 H5.2 Z",
+            stroke2: "M5.9 11.1 A2.1 2.1 0 1 0 10.1 11.1 A2.1 2.1 0 1 0 5.9 11.1 Z",
+            strokeWidth2: 1.3
+        },
         snapback: {
             fill: "M0.8 2.5 L7.2 3.6 L2.6 8.4 Z",
             stroke: "M4.6 5.2 A5 5 0 1 1 5.8 13.6",

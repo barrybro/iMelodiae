@@ -21,9 +21,10 @@ fn main() {
                 "qml/OutputMenu.qml",
                 "qml/LyricsPane.qml",
                 "qml/EqualizerPanel.qml",
+                "qml/IPod.qml",
             ]),
     )
     .qt_module("Quick")
-    .files(["src/player.rs", "src/library.rs", "src/lyrics.rs"])
+    .files(["src/player.rs", "src/library.rs", "src/lyrics.rs", "src/compositor.rs"])
     .build();
 }

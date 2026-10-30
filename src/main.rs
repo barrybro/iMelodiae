@@ -1,3 +1,4 @@
+mod compositor;
 mod coverart;
 mod library;
 mod lyrics;
