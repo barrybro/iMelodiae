@@ -6,12 +6,12 @@ import org.imelodiae
 Window {
     id: window
 
-    width: settings.windowWidth
-    height: settings.windowHeight
-    minimumWidth: 780
-    minimumHeight: 460
+    width: settings.miniPlayer ? settings.miniWidth : settings.windowWidth
+    height: settings.miniPlayer ? settings.miniHeight : settings.windowHeight
+    minimumWidth: settings.miniPlayer ? 150 : 780
+    minimumHeight: settings.miniPlayer ? 250 : 460
     visible: true
-    color: Theme.toolbarBottom
+    color: settings.miniPlayer ? Theme.toolbarUpper : Theme.toolbarBottom
     title: player.loaded && nowPlaying.title ? nowPlaying.title + " — iMelodiae" : "iMelodiae"
 
     property int selectedId: -1
@@ -19,13 +19,27 @@ Window {
     property var nowPlaying: ({ title: "", artist: "", album: "" })
     property string lcdMessage: ""
 
-    onWidthChanged: settings.windowWidth = width
-    onHeightChanged: settings.windowHeight = height
+    // The mini player keeps its own window size
+    onWidthChanged: {
+        if (settings.miniPlayer)
+            settings.miniWidth = width
+        else
+            settings.windowWidth = width
+    }
+    onHeightChanged: {
+        if (settings.miniPlayer)
+            settings.miniHeight = height
+        else
+            settings.windowHeight = height
+    }
 
     Settings {
         id: settings
         property int windowWidth: 1080
         property int windowHeight: 700
+        property bool miniPlayer: false
+        property int miniWidth: 270
+        property int miniHeight: 450
         property real volume: 0.75
         property bool browserVisible: true
         property bool artworkVisible: true
@@ -68,6 +82,10 @@ Window {
 
     Lyrics {
         id: songLyrics
+    }
+
+    Compositor {
+        id: compositor
     }
 
     LibraryModel {
@@ -146,6 +164,37 @@ Window {
             playId(library.previousId(playingId))
     }
 
+    function toggleMiniPlayer() {
+        const mini = !settings.miniPlayer
+        // Take the sizes before switching: the old minimum size can clamp the window
+        // for a moment, and that size would be saved for the new mode
+        const w = mini ? settings.miniWidth : settings.windowWidth
+        const h = mini ? settings.miniHeight : settings.windowHeight
+        // Only resize a floating window. A tiled one would flash at the new size until the
+        // compositor sized it back, and the iPod scales to fit whatever it's given anyway.
+        const resize = !compositor.managesSize()
+        // Detach the startup size bindings so switching modes doesn't resize by itself
+        window.width = window.width
+        window.height = window.height
+        equalizer.close()
+        outputMenu.close()
+        if (mini)
+            search.text = ""
+        settings.miniPlayer = mini
+        Qt.callLater(() => {
+            if (resize) {
+                window.width = w
+                window.height = h
+            }
+            if (mini) {
+                iPod.showNowPlaying()
+                iPod.forceActiveFocus()
+            } else {
+                trackList.focusList()
+            }
+        })
+    }
+
     function snapback() {
         if (playingId < 0)
             return
@@ -162,6 +211,7 @@ Window {
     // iTunes 5's unified title bar + toolbar: one smooth grey gradient
     Rectangle {
         id: toolbar
+        visible: !settings.miniPlayer
         anchors.left: parent.left
         anchors.right: parent.right
         height: 84
@@ -302,6 +352,7 @@ Window {
     // ── Panes ────────────────────────────────────────────────────────────
     Item {
         id: panes
+        visible: !settings.miniPlayer
         anchors.top: toolbar.bottom
         anchors.bottom: bottomBar.top
         anchors.left: parent.left
@@ -450,6 +501,7 @@ Window {
     // ── Bottom bar ───────────────────────────────────────────────────────
     Rectangle {
         id: bottomBar
+        visible: !settings.miniPlayer
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
@@ -519,6 +571,11 @@ Window {
             spacing: 8
 
             AquaSquareButton {
+                glyph: "miniplayer"
+                tooltip: qsTr("Switch to Mini Player")
+                onClicked: window.toggleMiniPlayer()
+            }
+            AquaSquareButton {
                 id: outputButton
                 glyph: "output"
                 tooltip: qsTr("Audio Output: %1").arg(outputMenu.currentName)
@@ -538,6 +595,34 @@ Window {
                 onClicked: equalizer.opened ? equalizer.close() : equalizer.open()
             }
         }
+    }
+
+    IPod {
+        id: iPod
+        anchors.fill: parent
+        visible: settings.miniPlayer
+        library: library
+        player: player
+        playingId: window.playingId
+        nowPlaying: window.nowPlaying
+        artworkSource: {
+            void library.artworkRevision
+            return visible && window.playingId >= 0 ? library.artworkUrl(window.playingId) : ""
+        }
+        shuffle: settings.shuffle
+        repeatMode: settings.repeatMode
+        volume: settings.volume
+        onPlayRequested: id => {
+            window.selectedId = id
+            window.playId(id)
+        }
+        onPlayPauseRequested: window.playPause()
+        onNextRequested: window.next()
+        onPreviousRequested: window.previous()
+        onShuffleEdited: shuffle => settings.shuffle = shuffle
+        onRepeatEdited: mode => settings.repeatMode = mode
+        onVolumeEdited: volume => settings.volume = volume
+        onExitRequested: window.toggleMiniPlayer()
     }
 
     EqualizerPanel {
@@ -595,7 +680,12 @@ Window {
     Shortcut { sequence: "Ctrl+Left"; onActivated: window.previous() }
     Shortcut { sequence: "Ctrl+Up"; onActivated: settings.volume = Math.min(1, settings.volume + 0.1) }
     Shortcut { sequence: "Ctrl+Down"; onActivated: settings.volume = Math.max(0, settings.volume - 0.1) }
-    Shortcut { sequences: [StandardKey.Find]; onActivated: search.field.forceActiveFocus() }
+    Shortcut { sequence: "Ctrl+Shift+M"; onActivated: window.toggleMiniPlayer() }
+    Shortcut {
+        sequences: [StandardKey.Find]
+        enabled: !settings.miniPlayer
+        onActivated: search.field.forceActiveFocus()
+    }
     Shortcut { sequences: [StandardKey.Open]; onActivated: folderDialog.open() }
     Shortcut { sequence: "Ctrl+B"; onActivated: settings.browserVisible = !settings.browserVisible }
     Shortcut { sequence: "Ctrl+L"; onActivated: window.snapback() }
@@ -614,7 +704,10 @@ Window {
     }
 
     Component.onCompleted: {
-        trackList.focusList()
+        if (settings.miniPlayer)
+            iPod.forceActiveFocus()
+        else
+            trackList.focusList()
         applyEqualizer()
         for (const arg of Qt.application.arguments) {
             if (arg.startsWith("--screenshot=")) {
