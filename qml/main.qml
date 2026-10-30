@@ -224,6 +224,7 @@ Window {
         }
 
         VolumeSlider {
+            id: volume
             anchors.left: transport.right
             anchors.leftMargin: 18
             anchors.verticalCenter: transport.verticalCenter
@@ -234,9 +235,13 @@ Window {
 
         LcdDisplay {
             id: lcd
-            width: Math.min(410, window.width - 2 * 290)
+            // Fill the gap between the volume slider and the search field,
+            // staying centred in the window for as long as there's room
+            readonly property real minX: volume.x + volume.width + 18
+            readonly property real maxRight: search.x - 18
+            width: Math.min(410, maxRight - minX)
             height: 48
-            x: (window.width - width) / 2
+            x: Math.max(minX, Math.min(maxRight - width, (window.width - width) / 2))
             y: 27
             title: window.nowPlaying.title ?? ""
             artist: window.nowPlaying.artist ?? ""
@@ -254,7 +259,7 @@ Window {
             anchors.right: browseButton.left
             anchors.rightMargin: 18
             y: 32
-            width: Math.max(100, Math.min(140, window.width - lcd.x - lcd.width - 110))
+            width: Math.max(100, Math.min(140, window.width - 740))
             onTextChanged: library.search = text
         }
 
