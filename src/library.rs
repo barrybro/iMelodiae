@@ -133,6 +133,19 @@ pub mod qobject {
         /// fit the column by measuring just these
         #[qinvokable]
         fn longest_values(self: &LibraryModel, role: &QString, count: i32) -> QStringList;
+
+        /// Every different value a text column has across the whole library, sorted
+        #[qinvokable]
+        fn distinct_values(self: &LibraryModel, role: &QString) -> QStringList;
+
+        /// Write tag changes (a JSON TagEdit) into the files of some tracks (a JSON array
+        /// of ids) in the background, then re-read them
+        #[qinvokable]
+        fn edit_tags(self: Pin<&mut LibraryModel>, ids_json: &QString, edit_json: &QString);
+
+        /// Edited tags have been saved and re-read
+        #[qsignal]
+        fn tags_edited(self: Pin<&mut LibraryModel>);
     }
 
     impl cxx_qt::Threading for LibraryModel {}
@@ -992,6 +1005,74 @@ impl qobject::LibraryModel {
                 .unwrap_or_default(),
             None => QVariant::default(),
         }
+    }
+
+    pub fn distinct_values(&self, role: &QString) -> QStringList {
+        let role = role.to_string();
+        let mut seen = HashSet::new();
+        let mut values: Vec<String> = self
+            .tracks
+            .iter()
+            .filter(|t| !t.removed)
+            .filter_map(|t| cell_text(t, &role))
+            .filter(|v| !v.is_empty() && seen.insert(v.to_lowercase()))
+            .collect();
+        values.sort_by_cached_key(|v| v.to_lowercase());
+        to_qstringlist(values)
+    }
+
+    pub fn edit_tags(mut self: Pin<&mut Self>, ids_json: &QString, edit_json: &QString) {
+        let Ok(edit) = serde_json::from_str::<scanner::TagEdit>(&edit_json.to_string()) else {
+            return;
+        };
+        let ids: Vec<i32> = serde_json::from_str(&ids_json.to_string()).unwrap_or_default();
+        let paths: Vec<String> = ids
+            .iter()
+            .filter_map(|&id| self.track(id))
+            .filter(|t| !t.removed)
+            .map(|t| t.path.clone())
+            .collect();
+        let total = paths.len();
+        if total == 0 {
+            return;
+        }
+        let songs = |n: usize| if n == 1 { "1 song".to_owned() } else { format!("{} songs", scanner::group_thousands(n)) };
+        self.as_mut().set_status_text(format!("Saving {}…", songs(total)));
+
+        let thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let mut upserts = Vec::new();
+            let mut failed: Vec<String> = Vec::new();
+            let mut reported = std::time::Instant::now();
+            for (i, path) in paths.iter().enumerate() {
+                match scanner::write_tags(Path::new(path), &edit) {
+                    Ok(()) => upserts.extend(scanner::read_track(Path::new(path))),
+                    Err(err) => failed.push(format!("{}: {err}", Path::new(path).display())),
+                }
+                if reported.elapsed().as_secs() >= 1 {
+                    reported = std::time::Instant::now();
+                    let done = i + 1;
+                    let _ = thread.queue(move |model: Pin<&mut qobject::LibraryModel>| {
+                        model.set_status_text(format!("Saving {done} of {total}…"));
+                    });
+                }
+            }
+            let _ = thread.queue(move |mut model: Pin<&mut qobject::LibraryModel>| {
+                let saved = upserts.len();
+                model.as_mut().apply_changes(Changes { upserts, ..Default::default() });
+                let msg = match failed.first() {
+                    None => format!("Updated {}", songs(saved)),
+                    Some(first) => {
+                        for f in &failed {
+                            eprintln!("iMelodiae: couldn't save tags to {f}");
+                        }
+                        format!("Couldn't save {} of {total} — {first}", failed.len())
+                    }
+                };
+                model.as_mut().set_status_text(msg);
+                model.as_mut().tags_edited();
+            });
+        });
     }
 
     pub fn longest_values(&self, role: &QString, count: i32) -> QStringList {

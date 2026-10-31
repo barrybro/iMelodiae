@@ -14,7 +14,9 @@ Window {
     color: settings.miniPlayer ? Theme.toolbarUpper : Theme.toolbarBottom
     title: player.loaded && nowPlaying.title ? nowPlaying.title + " — iMelodiae" : "iMelodiae"
 
+    // The focused song, and every selected song (Ctrl/Shift-click to select several)
     property int selectedId: -1
+    property var selectedIds: []
     property int playingId: -1
     property var nowPlaying: ({ title: "", artist: "", album: "" })
     property string lcdMessage: ""
@@ -92,6 +94,11 @@ Window {
     LibraryModel {
         id: library
         onStatusChanged: window.flash(status)
+        // Show edited tags for the playing song straight away
+        onTagsEdited: {
+            if (window.playingId >= 0)
+                window.nowPlaying = JSON.parse(library.trackInfo(window.playingId))
+        }
         Component.onCompleted: Qt.callLater(() => library.importDefaultFolder())
     }
 
@@ -107,6 +114,11 @@ Window {
         id: messageTimer
         interval: 4000
         onTriggered: if (!library.scanning) window.lcdMessage = ""
+    }
+
+    function select(ids, current) {
+        selectedIds = ids
+        selectedId = current
     }
 
     function flash(message) {
@@ -197,10 +209,10 @@ Window {
         })
     }
 
-    function showInfo(id) {
-        if (id < 0)
+    function showInfo(ids) {
+        if (ids.length === 0)
             return
-        songInfo.info = JSON.parse(library.trackInfo(id))
+        songInfo.load(ids.map(id => JSON.parse(library.trackInfo(id))), library.distinctValues("genre"))
         if (!songInfo.opened) {
             songInfo.x = (window.width - songInfo.width) / 2
             songInfo.y = Math.max(0, (window.height - songInfo.height) / 3)
@@ -216,7 +228,7 @@ Window {
             library.source = 0
             library.genre = ""
         }
-        selectedId = playingId
+        select([playingId], playingId)
         trackList.reveal(playingId)
     }
 
@@ -476,15 +488,16 @@ Window {
                 width: parent.width
                 tracks: library
                 selectedId: window.selectedId
+                selectedIds: window.selectedIds
                 playingId: window.playingId
                 playing: player.playing
                 widths: JSON.parse(settings.columnWidths)
                 order: settings.columnOrder ? JSON.parse(settings.columnOrder) : trackList.defaultOrder
-                onSelected: id => window.selectedId = id
+                onSelectionEdited: (ids, current) => window.select(ids, current)
                 onActivated: id => window.playId(id)
                 onWidthsEdited: widths => settings.columnWidths = JSON.stringify(widths)
                 onOrderEdited: order => settings.columnOrder = JSON.stringify(order)
-                onInfoRequested: id => window.showInfo(id)
+                onInfoRequested: ids => window.showInfo(ids)
             }
         }
 
@@ -629,7 +642,7 @@ Window {
         repeatMode: settings.repeatMode
         volume: settings.volume
         onPlayRequested: id => {
-            window.selectedId = id
+            window.select([id], id)
             window.playId(id)
         }
         onPlayPauseRequested: window.playPause()
@@ -664,6 +677,7 @@ Window {
             void library.artworkRevision
             return opened && info.id !== undefined ? library.artworkUrl(info.id) : ""
         }
+        onSaveRequested: (ids, edit) => library.editTags(JSON.stringify(ids), JSON.stringify(edit))
     }
 
     OutputMenu {
@@ -716,7 +730,7 @@ Window {
     Shortcut {
         sequence: "Ctrl+I"
         enabled: !settings.miniPlayer
-        onActivated: window.showInfo(window.selectedId)
+        onActivated: window.showInfo(window.selectedIds)
     }
     Shortcut { sequences: [StandardKey.Quit]; onActivated: Qt.quit() }
 
@@ -744,7 +758,7 @@ Window {
                 screenshotTimer.start()
             } else if (arg === "--play") {
                 Qt.callLater(() => Qt.callLater(() => {
-                    window.selectedId = library.idAt(1)
+                    window.select([library.idAt(1)], library.idAt(1))
                     window.playPause()
                 }))
             }

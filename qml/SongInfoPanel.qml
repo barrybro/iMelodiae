@@ -2,14 +2,77 @@ import QtQuick
 import QtQuick.Controls.Basic
 import org.imelodiae
 
-// Get Info: artwork, tags and file details for one song. Read-only. A floating panel
-// inside the main window, dragged by its title bar like the Equalizer.
+// Get Info for one song or many. Tags can be edited and are written into the files on
+// OK. With several songs selected, fields they share show that value and the rest show
+// "Mixed"; only fields you change (ticked) are written, to every selected song, and a
+// ticked field left empty removes that tag. A floating panel inside the main window,
+// dragged by its title bar like the Equalizer.
 Popup {
     id: root
 
-    // Parsed LibraryModel.trackInfo()
-    property var info: ({})
+    // Parsed LibraryModel.trackInfo() for each song
+    property var infos: []
+    readonly property var info: infos.length > 0 ? infos[0] : ({})
+    readonly property bool multiple: infos.length > 1
     property string artworkSource: ""
+    // Suggestions for the Genre field
+    property var genres: []
+
+    // Tag changes to write: a TagEdit (see scanner.rs) with only the changed fields
+    signal saveRequested(var trackIds, var edit)
+
+    readonly property var fields: [
+        { key: "title", label: qsTr("Name") },
+        { key: "artist", label: qsTr("Artist") },
+        { key: "albumArtist", label: qsTr("Album Artist") },
+        { key: "album", label: qsTr("Album") },
+        { key: "genre", label: qsTr("Genre"), suggest: true },
+        { key: "year", label: qsTr("Year"), number: true },
+        { key: "trackNumber", label: qsTr("Track #"), number: true },
+        { key: "discNumber", label: qsTr("Disc #"), number: true }
+    ]
+
+    function load(list, genreList) {
+        // Rebuild the fields so every edit and tick from last time is gone
+        editor.model = []
+        infos = list
+        genres = genreList
+        editor.model = fields
+    }
+
+    function shownValue(info, field) {
+        const v = info[field.key]
+        if (field.number)
+            return v ? String(v) : ""
+        return v ?? ""
+    }
+
+    // What the selected songs share for a field, or null when they differ
+    function commonValue(field) {
+        if (infos.length === 0)
+            return ""
+        const first = shownValue(infos[0], field)
+        for (let i = 1; i < infos.length; ++i)
+            if (shownValue(infos[i], field) !== first)
+                return null
+        return first
+    }
+
+    function save() {
+        const edit = {}
+        let any = false
+        for (let i = 0; i < editor.count; ++i) {
+            const row = editor.itemAt(i)
+            if (!row.apply)
+                continue
+            const text = row.text.trim()
+            edit[row.field.key] = row.field.number ? (parseInt(text, 10) || 0) : text
+            any = true
+        }
+        if (any)
+            saveRequested(infos.map(i => i.id), edit)
+        close()
+    }
 
     function formatTime(ms) {
         const s = Math.max(0, Math.floor(ms / 1000))
@@ -26,8 +89,10 @@ Popup {
         return bytes > 0 ? qsTr("%1 MB").arg((bytes / (1024 * 1024)).toFixed(1)) : ""
     }
 
-    // Label/value pairs, skipping anything the file doesn't have
+    // Read-only file details for a single song, skipping anything the file doesn't have
     readonly property var details: {
+        if (multiple)
+            return []
         const i = info
         const rows = [
             [qsTr("Kind"), i.kind ?? ""],
@@ -35,11 +100,6 @@ Popup {
             [qsTr("Bit Rate"), i.bitRate ? qsTr("%1 kbps").arg(i.bitRate) : ""],
             [qsTr("Sample Rate"), i.sampleRate ? qsTr("%1 kHz").arg((i.sampleRate / 1000).toFixed(1)) : ""],
             [qsTr("Size"), formatSize(i.size ?? 0)],
-            [qsTr("Album Artist"), i.albumArtist ?? ""],
-            [qsTr("Genre"), i.genre ?? ""],
-            [qsTr("Year"), i.year ? String(i.year) : ""],
-            [qsTr("Track"), i.trackNumber ? String(i.trackNumber) : ""],
-            [qsTr("Disc"), i.discNumber ? String(i.discNumber) : ""],
             [qsTr("Play Count"), String(i.playCount ?? 0)],
             [qsTr("Last Played"), formatDate(i.lastPlayed ?? 0)],
             [qsTr("Date Added"), formatDate(i.dateAdded ?? 0)]
@@ -47,10 +107,11 @@ Popup {
         return rows.filter(r => r[1] !== "")
     }
 
-    width: 400
+    width: 420
     height: contentItem.implicitHeight
     padding: 0
     modal: false
+    focus: true
     closePolicy: Popup.CloseOnEscape
 
     background: Item {
@@ -73,8 +134,39 @@ Popup {
         }
     }
 
+    // Aqua push button; the default one is blue gel
+    component PanelButton: Rectangle {
+        id: button
+        property string text
+        property bool isDefault: false
+        signal clicked()
+        width: Math.max(80, label.implicitWidth + 28)
+        height: 21
+        radius: height / 2
+        border.color: isDefault ? "#2457b0" : "#6b6b6b"
+        readonly property bool down: buttonMouse.pressed && buttonMouse.containsMouse
+        gradient: Gradient {
+            GradientStop { position: 0.0; color: button.isDefault ? (button.down ? Theme.gelMid : Theme.gelTop) : (button.down ? "#c8c8c8" : "#ffffff") }
+            GradientStop { position: 0.5; color: button.isDefault ? (button.down ? Theme.gelBottom : Theme.gelMid) : (button.down ? "#b4b4b4" : "#e6e6e6") }
+            GradientStop { position: 1.0; color: button.isDefault ? "#8cc0ff" : (button.down ? "#d0d0d0" : "#f6f6f6") }
+        }
+        Text {
+            id: label
+            anchors.centerIn: parent
+            text: button.text
+            font.family: Theme.font
+            font.pixelSize: Theme.listFontSize + 1
+            color: button.isDefault ? "#0d2a5c" : Theme.text
+        }
+        MouseArea {
+            id: buttonMouse
+            anchors.fill: parent
+            onClicked: button.clicked()
+        }
+    }
+
     contentItem: Item {
-        implicitHeight: sheet.y + sheet.height + 12
+        implicitHeight: buttons.y + buttons.height + 12
 
         // Title bar: drag to move, round button to close
         Item {
@@ -106,7 +198,7 @@ Popup {
                 width: parent.width - 60
                 horizontalAlignment: Text.AlignHCenter
                 elide: Text.ElideRight
-                text: root.info.title || qsTr("Song Info")
+                text: root.multiple ? qsTr("Multiple Song Information") : (root.info.title || qsTr("Song Info"))
                 font.family: Theme.font
                 font.pixelSize: 12
                 color: "#1a1a1a"
@@ -150,8 +242,8 @@ Popup {
                     spacing: 12
 
                     Rectangle {
-                        width: 104
-                        height: 104
+                        width: 84
+                        height: 84
                         color: Theme.sourceBackground
                         border.color: "#b9b9b9"
 
@@ -170,8 +262,8 @@ Popup {
                         GlyphIcon {
                             anchors.centerIn: parent
                             visible: art.status !== Image.Ready
-                            width: 40
-                            height: 40
+                            width: 34
+                            height: 34
                             kind: "note"
                             color: "#a9b3c2"
                             engraved: false
@@ -179,15 +271,15 @@ Popup {
                     }
 
                     Column {
-                        width: body.width - 116
+                        width: body.width - 96
                         anchors.verticalCenter: parent.verticalCenter
                         spacing: 4
 
                         Text {
                             width: parent.width
-                            text: root.info.title ?? ""
+                            text: root.multiple ? qsTr("%1 songs").arg(root.infos.length) : (root.info.title ?? "")
                             wrapMode: Text.Wrap
-                            maximumLineCount: 3
+                            maximumLineCount: 2
                             elide: Text.ElideRight
                             font.family: Theme.font
                             font.pixelSize: 14
@@ -196,19 +288,21 @@ Popup {
                         }
                         Text {
                             width: parent.width
-                            text: root.info.artist ?? ""
+                            readonly property var artist: root.commonValue(root.fields[1])
+                            text: artist === null ? qsTr("Mixed artists") : artist
                             elide: Text.ElideRight
                             font.family: Theme.font
                             font.pixelSize: 12
-                            color: Theme.text
+                            color: artist === null ? Theme.dimText : Theme.text
                         }
                         Text {
                             width: parent.width
-                            text: root.info.album ?? ""
+                            readonly property var album: root.commonValue(root.fields[3])
+                            text: album === null ? qsTr("Mixed albums") : album
                             elide: Text.ElideRight
                             font.family: Theme.font
                             font.pixelSize: 12
-                            color: Theme.text
+                            color: album === null ? Theme.dimText : Theme.text
                         }
                     }
                 }
@@ -219,7 +313,255 @@ Popup {
                     color: Theme.gridLine
                 }
 
+                // Editable tags
                 Column {
+                    width: parent.width
+                    spacing: 4
+
+                    Repeater {
+                        id: editor
+                        delegate: Item {
+                            id: fieldRow
+                            required property var modelData
+                            required property int index
+                            readonly property var field: modelData
+                            readonly property var original: root.commonValue(field)
+                            property alias text: input.text
+                            // Write this field on OK. Several songs: ticked by hand or by
+                            // typing. One song: whenever it differs from the file.
+                            property bool ticked: false
+                            readonly property bool apply: root.multiple ? ticked : input.text !== (original ?? "")
+
+                            width: parent.width
+                            height: 22
+
+                            Text {
+                                id: fieldLabel
+                                width: 84
+                                anchors.verticalCenter: parent.verticalCenter
+                                horizontalAlignment: Text.AlignRight
+                                text: fieldRow.field.label + ":"
+                                font.family: Theme.font
+                                font.pixelSize: Theme.listFontSize
+                                font.bold: true
+                                color: Theme.dimText
+                            }
+
+                            // Apply checkbox, only when editing several songs
+                            Rectangle {
+                                id: tick
+                                visible: root.multiple
+                                anchors.left: fieldLabel.right
+                                anchors.leftMargin: 6
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: visible ? 14 : 0
+                                height: 14
+                                radius: 3
+                                border.color: fieldRow.ticked ? "#2457b0" : "#6b6b6b"
+                                gradient: Gradient {
+                                    GradientStop { position: 0.0; color: fieldRow.ticked ? Theme.gelTop : "#ffffff" }
+                                    GradientStop { position: 0.5; color: fieldRow.ticked ? Theme.gelMid : "#e9e9e9" }
+                                    GradientStop { position: 1.0; color: fieldRow.ticked ? "#8cc0ff" : "#f8f8f8" }
+                                }
+                                Text {
+                                    anchors.centerIn: parent
+                                    visible: fieldRow.ticked
+                                    text: "✓"
+                                    font.pixelSize: 11
+                                    font.bold: true
+                                    color: "#0d2a5c"
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    anchors.margins: -3
+                                    onClicked: fieldRow.ticked = !fieldRow.ticked
+                                }
+                            }
+
+                            Rectangle {
+                                id: box
+                                anchors.left: tick.right
+                                anchors.leftMargin: root.multiple ? 6 : 8
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                height: 20
+                                color: "white"
+                                border.color: input.activeFocus ? "#5b8fdd" : "#8e8e8e"
+                                border.width: input.activeFocus ? 2 : 1
+
+                                TextField {
+                                    id: input
+                                    anchors.fill: parent
+                                    anchors.rightMargin: suggestButton.visible ? suggestButton.width : 0
+                                    padding: 0
+                                    leftPadding: 5
+                                    rightPadding: 4
+                                    background: null
+                                    verticalAlignment: TextInput.AlignVCenter
+                                    font.family: Theme.font
+                                    font.pixelSize: Theme.listFontSize + 1
+                                    color: Theme.text
+                                    selectionColor: "#b5d5ff"
+                                    selectedTextColor: Theme.text
+                                    selectByMouse: true
+                                    placeholderText: fieldRow.original === null ? qsTr("Mixed") : ""
+                                    placeholderTextColor: Theme.dimText
+                                    inputMethodHints: fieldRow.field.number ? Qt.ImhDigitsOnly : Qt.ImhNone
+                                    validator: fieldRow.field.number ? digits : null
+                                    text: fieldRow.original ?? ""
+                                    onTextEdited: {
+                                        fieldRow.ticked = true
+                                        if (fieldRow.field.suggest && activeFocus)
+                                            suggestions.show(false)
+                                    }
+                                    onAccepted: {
+                                        if (suggestions.opened && suggestions.pick())
+                                            return
+                                        root.save()
+                                    }
+                                    Keys.onDownPressed: if (suggestions.opened) suggestions.move(1)
+                                    Keys.onUpPressed: if (suggestions.opened) suggestions.move(-1)
+                                    Keys.onEscapePressed: event => {
+                                        if (suggestions.opened)
+                                            suggestions.close()
+                                        else
+                                            root.close()
+                                    }
+                                }
+
+                                IntValidator {
+                                    id: digits
+                                    bottom: 0
+                                    top: 9999
+                                }
+
+                                // Genre drop-down: every genre in the library
+                                Rectangle {
+                                    id: suggestButton
+                                    visible: fieldRow.field.suggest === true
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    anchors.bottom: parent.bottom
+                                    anchors.margins: 1
+                                    width: 18
+                                    gradient: Gradient {
+                                        GradientStop { position: 0.0; color: Theme.gelTop }
+                                        GradientStop { position: 0.5; color: Theme.gelMid }
+                                        GradientStop { position: 1.0; color: "#8cc0ff" }
+                                    }
+                                    GlyphIcon {
+                                        anchors.centerIn: parent
+                                        width: 8
+                                        height: 6
+                                        kind: "down"
+                                        color: "#0d2a5c"
+                                        engraved: false
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onClicked: suggestions.opened ? suggestions.close() : suggestions.show(true)
+                                    }
+                                }
+                            }
+
+                            Popup {
+                                id: suggestions
+                                y: box.y + box.height + 1
+                                x: box.x
+                                width: box.width
+                                height: Math.min(180, list.contentHeight + 2)
+                                padding: 1
+                                closePolicy: Popup.CloseOnPressOutsideParent | Popup.CloseOnEscape
+                                visible: false
+
+                                property bool showAll: false
+                                readonly property var matches: {
+                                    if (!fieldRow.field.suggest)
+                                        return []
+                                    const q = input.text.trim().toLowerCase()
+                                    return showAll || q === "" ? root.genres
+                                                               : root.genres.filter(g => g.toLowerCase().includes(q))
+                                }
+
+                                function show(all) {
+                                    showAll = all
+                                    list.currentIndex = all ? root.genres.indexOf(input.text) : -1
+                                    if (matches.length > 0)
+                                        open()
+                                    else
+                                        close()
+                                    if (all && list.currentIndex >= 0)
+                                        list.positionViewAtIndex(list.currentIndex, ListView.Center)
+                                }
+                                function move(step) {
+                                    list.currentIndex = Math.max(0, Math.min(list.count - 1, list.currentIndex + step))
+                                }
+                                function pick() {
+                                    if (list.currentIndex < 0)
+                                        return false
+                                    choose(matches[list.currentIndex])
+                                    return true
+                                }
+                                function choose(genre) {
+                                    input.text = genre
+                                    fieldRow.ticked = true
+                                    close()
+                                    input.forceActiveFocus()
+                                }
+
+                                background: Rectangle {
+                                    color: "white"
+                                    border.color: "#8e8e8e"
+                                }
+                                contentItem: ListView {
+                                    id: list
+                                    clip: true
+                                    model: suggestions.matches
+                                    boundsBehavior: Flickable.StopAtBounds
+                                    highlightMoveDuration: 0
+                                    onCurrentIndexChanged: if (currentIndex >= 0) positionViewAtIndex(currentIndex, ListView.Contain)
+                                    ScrollBar.vertical: AquaScrollBar {}
+                                    delegate: Rectangle {
+                                        id: option
+                                        required property string modelData
+                                        required property int index
+                                        readonly property bool lit: ListView.isCurrentItem || optionMouse.containsMouse
+                                        width: ListView.view.width
+                                        height: 18
+                                        color: lit ? Theme.selection : "transparent"
+                                        Text {
+                                            x: 6
+                                            width: parent.width - 12
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            text: option.modelData
+                                            elide: Text.ElideRight
+                                            font.family: Theme.font
+                                            font.pixelSize: Theme.listFontSize + 1
+                                            color: option.lit ? Theme.selectionText : Theme.text
+                                        }
+                                        MouseArea {
+                                            id: optionMouse
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            onClicked: suggestions.choose(option.modelData)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    visible: !root.multiple
+                    width: parent.width
+                    height: 1
+                    color: Theme.gridLine
+                }
+
+                // Read-only file details (one song)
+                Column {
+                    visible: !root.multiple
                     width: parent.width
                     spacing: 3
 
@@ -231,7 +573,7 @@ Popup {
 
                             // Labels right-aligned in a fixed column, values beside them
                             Text {
-                                width: 90
+                                width: 84
                                 horizontalAlignment: Text.AlignRight
                                 text: modelData[0] + ":"
                                 font.family: Theme.font
@@ -240,7 +582,7 @@ Popup {
                                 color: Theme.dimText
                             }
                             Text {
-                                width: body.width - 98
+                                width: body.width - 92
                                 text: modelData[1]
                                 elide: Text.ElideRight
                                 font.family: Theme.font
@@ -249,38 +591,56 @@ Popup {
                             }
                         }
                     }
-                }
 
-                Item {
-                    width: parent.width
-                    height: where.implicitHeight
+                    Item {
+                        width: parent.width
+                        height: where.implicitHeight
 
-                    Text {
-                        id: whereLabel
-                        width: 90
-                        horizontalAlignment: Text.AlignRight
-                        text: qsTr("Where:")
-                        font.family: Theme.font
-                        font.pixelSize: Theme.listFontSize
-                        font.bold: true
-                        color: Theme.dimText
-                    }
-                    TextEdit {
-                        id: where
-                        anchors.left: whereLabel.right
-                        anchors.leftMargin: 8
-                        anchors.right: parent.right
-                        text: root.info.path ?? ""
-                        readOnly: true
-                        selectByMouse: true
-                        wrapMode: TextEdit.WrapAnywhere
-                        font.family: Theme.font
-                        font.pixelSize: Theme.listFontSize
-                        color: Theme.text
-                        selectionColor: "#b5d5ff"
-                        selectedTextColor: Theme.text
+                        Text {
+                            id: whereLabel
+                            width: 84
+                            horizontalAlignment: Text.AlignRight
+                            text: qsTr("Where:")
+                            font.family: Theme.font
+                            font.pixelSize: Theme.listFontSize
+                            font.bold: true
+                            color: Theme.dimText
+                        }
+                        TextEdit {
+                            id: where
+                            anchors.left: whereLabel.right
+                            anchors.leftMargin: 8
+                            anchors.right: parent.right
+                            text: root.info.path ?? ""
+                            readOnly: true
+                            selectByMouse: true
+                            wrapMode: TextEdit.WrapAnywhere
+                            font.family: Theme.font
+                            font.pixelSize: Theme.listFontSize
+                            color: Theme.text
+                            selectionColor: "#b5d5ff"
+                            selectedTextColor: Theme.text
+                        }
                     }
                 }
+            }
+        }
+
+        Row {
+            id: buttons
+            anchors.right: parent.right
+            anchors.rightMargin: 12
+            y: sheet.y + sheet.height + 10
+            spacing: 10
+
+            PanelButton {
+                text: qsTr("Cancel")
+                onClicked: root.close()
+            }
+            PanelButton {
+                text: qsTr("OK")
+                isDefault: true
+                onClicked: root.save()
             }
         }
     }

@@ -7,7 +7,17 @@ Rectangle {
     id: root
 
     required property var tracks
+    // The focused song (keyboard moves from here) and every selected song
     property int selectedId: -1
+    property var selectedIds: []
+    readonly property var selectedSet: {
+        const set = {}
+        for (const id of selectedIds)
+            set[id] = true
+        return set
+    }
+    // Where Shift-click and Shift-arrow selections start from
+    property int anchorId: -1
     property int playingId: -1
     property bool playing: false
     // Column widths by role, persisted by the window
@@ -18,10 +28,10 @@ Rectangle {
     property bool preserveScroll: false
 
     signal activated(int trackId)
-    signal selected(int trackId)
+    signal selectionEdited(var trackIds, int current)
     signal widthsEdited(var widths)
     signal orderEdited(var order)
-    signal infoRequested(int trackId)
+    signal infoRequested(var trackIds)
 
     color: "white"
     clip: true
@@ -182,8 +192,57 @@ Rectangle {
         if (count === 0)
             return
         row = Math.max(0, Math.min(count - 1, row))
-        root.selected(root.tracks.idAt(row))
+        const id = root.tracks.idAt(row)
+        anchorId = id
+        root.selectionEdited([id], id)
         list.positionViewAtIndex(row, ListView.Contain)
+    }
+
+    // Select from the anchor to a row (Shift), optionally adding to the selection (Ctrl)
+    function extendTo(row, adding) {
+        const count = list.count
+        if (count === 0)
+            return
+        row = Math.max(0, Math.min(count - 1, row))
+        const from = root.tracks.rowOfId(anchorId)
+        if (from < 0)
+            return select(row)
+        const ids = adding ? selectedIds.slice() : []
+        const have = adding ? Object.assign({}, selectedSet) : {}
+        for (let r = Math.min(from, row); r <= Math.max(from, row); ++r) {
+            const id = root.tracks.idAt(r)
+            if (!have[id]) {
+                have[id] = true
+                ids.push(id)
+            }
+        }
+        root.selectionEdited(ids, root.tracks.idAt(row))
+        list.positionViewAtIndex(row, ListView.Contain)
+    }
+
+    function toggle(id) {
+        anchorId = id
+        if (selectedSet[id])
+            root.selectionEdited(selectedIds.filter(i => i !== id), id)
+        else
+            root.selectionEdited(selectedIds.concat([id]), id)
+    }
+
+    function selectAll() {
+        const ids = []
+        for (let r = 0; r < list.count; ++r)
+            ids.push(root.tracks.idAt(r))
+        root.selectionEdited(ids, selectedId)
+    }
+
+    function clickRow(id, modifiers) {
+        list.forceActiveFocus()
+        if (modifiers & Qt.ShiftModifier)
+            extendTo(root.tracks.rowOfId(id), modifiers & Qt.ControlModifier)
+        else if (modifiers & Qt.ControlModifier)
+            toggle(id)
+        else
+            select(root.tracks.rowOfId(id))
     }
 
     function reveal(trackId) {
@@ -330,7 +389,11 @@ Rectangle {
         property int trackId: -1
         items: [
             { label: qsTr("Play"), action: "play" },
-            { label: qsTr("Get Info"), action: "info" },
+            {
+                label: root.selectedIds.length > 1
+                       ? qsTr("Get Info for %1 Songs").arg(root.selectedIds.length) : qsTr("Get Info"),
+                action: "info"
+            },
             { separator: true },
             { label: qsTr("Show in Folder"), action: "folder" }
         ]
@@ -338,7 +401,7 @@ Rectangle {
             if (action === "play") {
                 root.activated(trackId)
             } else if (action === "info") {
-                root.infoRequested(trackId)
+                root.infoRequested(root.selectedIds)
             } else if (action === "folder") {
                 const uri = root.tracks.uriOf(trackId)
                 if (uri)
@@ -397,7 +460,7 @@ Rectangle {
             id: row
             required property var model
             required property int index
-            readonly property bool isSelected: model.trackId === root.selectedId
+            readonly property bool isSelected: root.selectedSet[model.trackId] === true
             readonly property bool isPlaying: model.trackId === root.playingId
 
             width: Math.max(root.totalWidth, ListView.view.width)
@@ -454,11 +517,15 @@ Rectangle {
                 anchors.fill: parent
                 acceptedButtons: Qt.LeftButton | Qt.RightButton
                 onPressed: mouse => {
-                    list.forceActiveFocus()
-                    root.selected(row.model.trackId)
                     if (mouse.button === Qt.RightButton) {
+                        // Right-clicking inside the selection acts on all of it
+                        if (!row.isSelected)
+                            root.clickRow(row.model.trackId, 0)
+                        list.forceActiveFocus()
                         songMenu.trackId = row.model.trackId
                         songMenu.popupAt(row, mouse.x, mouse.y)
+                    } else {
+                        root.clickRow(row.model.trackId, mouse.modifiers)
                     }
                 }
                 onDoubleClicked: mouse => {
@@ -482,10 +549,24 @@ Rectangle {
             }
         }
 
-        Keys.onUpPressed: root.select(root.tracks.rowOfId(root.selectedId) - 1)
-        Keys.onDownPressed: root.select(root.tracks.rowOfId(root.selectedId) + 1)
+        Keys.onUpPressed: event => {
+            const row = root.tracks.rowOfId(root.selectedId) - 1
+            if (event.modifiers & Qt.ShiftModifier)
+                root.extendTo(row, false)
+            else
+                root.select(row)
+        }
+        Keys.onDownPressed: event => {
+            const row = root.tracks.rowOfId(root.selectedId) + 1
+            if (event.modifiers & Qt.ShiftModifier)
+                root.extendTo(row, false)
+            else
+                root.select(row)
+        }
         Keys.onPressed: event => {
-            if (event.key === Qt.Key_Home) {
+            if (event.matches(StandardKey.SelectAll)) {
+                root.selectAll()
+            } else if (event.key === Qt.Key_Home) {
                 root.select(0)
             } else if (event.key === Qt.Key_End) {
                 root.select(count - 1)
