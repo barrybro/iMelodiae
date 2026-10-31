@@ -58,7 +58,15 @@ Popup {
         return first
     }
 
+    // Fields that are rarely meant to be the same on every song, so a bulk change asks first
+    readonly property var riskyKeys: ["title", "trackNumber"]
+
     function save() {
+        if (confirmation.edit) {
+            // Enter again while the sheet is up means "Change Anyway"
+            commit(confirmation.edit)
+            return
+        }
         const edit = {}
         let any = false
         for (let i = 0; i < editor.count; ++i) {
@@ -69,10 +77,22 @@ Popup {
             edit[row.field.key] = row.field.number ? (parseInt(text, 10) || 0) : text
             any = true
         }
-        if (any)
-            saveRequested(infos.map(i => i.id), edit)
+        if (!any) {
+            close()
+        } else if (multiple && riskyKeys.some(k => k in edit)) {
+            confirmation.edit = edit
+        } else {
+            commit(edit)
+        }
+    }
+
+    function commit(edit) {
+        confirmation.edit = null
+        saveRequested(infos.map(i => i.id), edit)
         close()
     }
+
+    onClosed: confirmation.edit = null
 
     function formatTime(ms) {
         const s = Math.max(0, Math.floor(ms / 1000))
@@ -424,6 +444,8 @@ Popup {
                                     Keys.onEscapePressed: event => {
                                         if (suggestions.opened)
                                             suggestions.close()
+                                        else if (confirmation.edit)
+                                            confirmation.edit = null
                                         else
                                             root.close()
                                     }
@@ -641,6 +663,113 @@ Popup {
                 text: qsTr("OK")
                 isDefault: true
                 onClicked: root.save()
+            }
+        }
+
+        // Confirmation sheet for bulk changes to Name or Track #, dropping from the title
+        // bar like a Mac OS X sheet. Dims and blocks the panel underneath while it's up.
+        Item {
+            id: confirmation
+            // The edit waiting for confirmation, or null
+            property var edit: null
+            readonly property var risky: edit
+                ? root.fields.filter(f => root.riskyKeys.includes(f.key) && f.key in edit) : []
+
+            anchors.fill: parent
+            anchors.topMargin: titleBar.height
+            visible: edit !== null
+            z: 10
+            clip: true
+
+            Rectangle {
+                anchors.fill: parent
+                color: Qt.rgba(0, 0, 0, 0.18)
+            }
+            MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.AllButtons
+                onWheel: wheel => wheel.accepted = true
+            }
+
+            Rectangle {
+                id: sheetBox
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: parent.width - 40
+                height: message.y + message.height + 16 + sheetButtons.height + 14
+                y: confirmation.visible ? -1 : -height
+                Behavior on y {
+                    NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+                }
+                border.color: "#6b6b6b"
+                gradient: Gradient {
+                    GradientStop { position: 0.0; color: "#e9e9e9" }
+                    GradientStop { position: 1.0; color: "#f6f6f6" }
+                }
+
+                // Soft shadow under the sheet
+                Rectangle {
+                    anchors.top: parent.bottom
+                    width: parent.width
+                    height: 4
+                    gradient: Gradient {
+                        GradientStop { position: 0.0; color: Qt.rgba(0, 0, 0, 0.22) }
+                        GradientStop { position: 1.0; color: "transparent" }
+                    }
+                }
+
+                Text {
+                    id: heading
+                    x: 18
+                    y: 16
+                    width: parent.width - 36
+                    wrapMode: Text.Wrap
+                    text: qsTr("Give all %1 songs the same %2?")
+                          .arg(root.infos.length)
+                          .arg(confirmation.risky.map(f => f.label).join(qsTr(" and ")))
+                    font.family: Theme.font
+                    font.pixelSize: 13
+                    font.bold: true
+                    color: Theme.text
+                }
+                Text {
+                    id: message
+                    anchors.left: heading.left
+                    anchors.right: heading.right
+                    anchors.top: heading.bottom
+                    anchors.topMargin: 8
+                    wrapMode: Text.Wrap
+                    text: {
+                        const lines = confirmation.risky.map(f => {
+                            const v = confirmation.edit[f.key]
+                            return v === "" || v === 0
+                                ? qsTr("• %1 will be removed from every selected song.").arg(f.label)
+                                : qsTr("• Every selected song's %1 will become “%2”.").arg(f.label).arg(v)
+                        })
+                        return lines.join("\n") + "\n\n" + qsTr("This is written into the files and can't be undone.")
+                    }
+                    font.family: Theme.font
+                    font.pixelSize: Theme.listFontSize
+                    color: Theme.text
+                }
+
+                Row {
+                    id: sheetButtons
+                    anchors.right: parent.right
+                    anchors.rightMargin: 14
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 14
+                    spacing: 10
+
+                    PanelButton {
+                        text: qsTr("Cancel")
+                        onClicked: confirmation.edit = null
+                    }
+                    PanelButton {
+                        text: qsTr("Change Anyway")
+                        isDefault: true
+                        onClicked: root.commit(confirmation.edit)
+                    }
+                }
             }
         }
     }
