@@ -128,6 +128,11 @@ pub mod qobject {
         /// Bump play count / last played when a song finishes
         #[qinvokable]
         fn mark_played(self: Pin<&mut LibraryModel>, id: i32);
+
+        /// The `count` longest texts a column shows in the current view, so the list can
+        /// fit the column by measuring just these
+        #[qinvokable]
+        fn longest_values(self: &LibraryModel, role: &QString, count: i32) -> QStringList;
     }
 
     impl cxx_qt::Threading for LibraryModel {}
@@ -237,6 +242,26 @@ impl cxx_qt::Initialize for qobject::LibraryModel {
         self.as_mut().rust_mut().watcher = watcher;
         self.rescan();
     }
+}
+
+/// What a song list cell shows for a text column role (None for other roles)
+fn cell_text(t: &Track, role: &str) -> Option<String> {
+    let number = |n: u32| if n == 0 { String::new() } else { n.to_string() };
+    Some(match role {
+        "title" => t.title.clone(),
+        "artist" => t.artist.clone(),
+        "album" => t.album.clone(),
+        "genre" => t.genre.clone(),
+        "kind" => t.kind.clone(),
+        "time" => scanner::format_time(t.duration_ms),
+        "trackNumber" => number(t.track_number),
+        "year" => number(t.year),
+        "playCount" => number(t.play_count),
+        "bitRate" if t.bitrate == 0 => String::new(),
+        "bitRate" => format!("{} kbps", scanner::group_thousands(t.bitrate as usize)),
+        "sampleRate" => format!("{:.1} kHz", t.sample_rate as f64 / 1000.0),
+        _ => return None,
+    })
 }
 
 fn display_artist(t: &Track) -> &str {
@@ -957,40 +982,29 @@ impl qobject::LibraryModel {
             return QVariant::default();
         };
         let t = &self.tracks[id];
-        let number = |n: u32| {
-            if n == 0 {
-                QVariant::from(&QString::default())
-            } else {
-                QVariant::from(&QString::from(n.to_string()))
-            }
-        };
         match ROLES.get((role - USER_ROLE) as usize).copied() {
             Some("trackId") => QVariant::from(&(id as i32)),
-            Some("title") => QVariant::from(&QString::from(t.title.as_str())),
-            Some("artist") => QVariant::from(&QString::from(t.artist.as_str())),
-            Some("album") => QVariant::from(&QString::from(t.album.as_str())),
-            Some("genre") => QVariant::from(&QString::from(t.genre.as_str())),
-            Some("kind") => QVariant::from(&QString::from(t.kind.as_str())),
-            Some("time") => QVariant::from(&QString::from(scanner::format_time(t.duration_ms))),
-            Some("trackNumber") => number(t.track_number),
-            Some("year") => number(t.year),
-            Some("playCount") => number(t.play_count),
-            Some("bitRate") => {
-                if t.bitrate == 0 {
-                    QVariant::from(&QString::default())
-                } else {
-                    let kbps = scanner::group_thousands(t.bitrate as usize);
-                    QVariant::from(&QString::from(format!("{kbps} kbps")))
-                }
-            }
-            Some("sampleRate") => {
-                QVariant::from(&QString::from(format!("{:.1} kHz", t.sample_rate as f64 / 1000.0)))
-            }
             // Seconds since the epoch (0 = never), formatted for the locale in QML
             Some("dateAdded") => QVariant::from(&(t.date_added as f64)),
             Some("lastPlayed") => QVariant::from(&(t.last_played as f64)),
-            _ => QVariant::default(),
+            Some(name) => cell_text(t, name)
+                .map(|text| QVariant::from(&QString::from(text)))
+                .unwrap_or_default(),
+            None => QVariant::default(),
         }
+    }
+
+    pub fn longest_values(&self, role: &QString, count: i32) -> QStringList {
+        let role = role.to_string();
+        let mut values: Vec<String> = self
+            .view
+            .iter()
+            .filter_map(|&id| cell_text(&self.tracks[id], &role))
+            .collect();
+        values.sort_unstable_by(|a, b| b.chars().count().cmp(&a.chars().count()).then_with(|| a.cmp(b)));
+        values.dedup();
+        values.truncate(count.max(0) as usize);
+        to_qstringlist(values)
     }
 
     pub fn role_names(&self) -> QHash<QHashPair_i32_QByteArray> {

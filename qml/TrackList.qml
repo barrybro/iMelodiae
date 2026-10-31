@@ -106,6 +106,34 @@ Rectangle {
         return slot >= 0 && slot < others.length ? layout[others[slot]].x : totalWidth
     }
 
+    FontMetrics {
+        id: cellMetrics
+        font.family: Theme.font
+        font.pixelSize: Theme.listFontSize
+    }
+
+    // Widen or narrow a column to its widest entry in the current view, or its heading
+    function fitColumn(col) {
+        let samples
+        if (col.role === "dateAdded" || col.role === "lastPlayed") {
+            // Dates all format alike; the widest has two-digit day, month and hour
+            samples = [formatDate(new Date(2026, 11, 28, 23, 58).getTime() / 1000)]
+        } else {
+            // The longest few by characters; proportional fonts can reorder those slightly
+            samples = tracks.longestValues(col.role, 40)
+        }
+        let widest = 0
+        for (const text of samples)
+            widest = Math.max(widest, cellMetrics.advanceWidth(text))
+        // Cell text has 5px on the left and 6px on the right; headings leave room for the
+        // sort arrow
+        const cell = Math.ceil(widest) + 11 + 2
+        const heading = Math.ceil(cellMetrics.advanceWidth(col.title)) + 5 + 4 + 13
+        const next = Object.assign({}, widths)
+        next[col.role] = Math.max(36, cell, heading)
+        widthsEdited(next)
+    }
+
     function formatDate(secs) {
         return secs > 0 ? new Date(secs * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat) : ""
     }
@@ -250,6 +278,8 @@ Rectangle {
                             next[cell.modelData.role] = Math.max(36, Math.round(startWidth + dx))
                             root.widthsEdited(next)
                         }
+                        // Double-click the edge to fit the column to its contents
+                        onDoubleClicked: root.fitColumn(cell.modelData)
                     }
                 }
             }
