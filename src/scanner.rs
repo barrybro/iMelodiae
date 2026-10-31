@@ -1,10 +1,10 @@
 //! Reading audio files from disk: tags, durations, cover art and the on-disk library database.
 
-use lofty::config::ParseOptions;
+use lofty::config::{ParseOptions, WriteOptions};
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::mp4::{Mp4Codec, Mp4File};
 use lofty::picture::PictureType;
-use lofty::tag::{Accessor, ItemKey};
+use lofty::tag::{Accessor, ItemKey, Tag};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -134,6 +134,87 @@ pub fn read_track(path: &Path) -> Option<Track> {
     }
 
     Some(track)
+}
+
+/// Tag changes to write to a file. `None` leaves a field alone; an empty string or 0
+/// removes it.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TagEdit {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album_artist: Option<String>,
+    pub album: Option<String>,
+    pub genre: Option<String>,
+    pub year: Option<u32>,
+    pub track_number: Option<u32>,
+    pub disc_number: Option<u32>,
+}
+
+/// Write tag changes into an audio file, in the tag `read_track` reads from
+pub fn write_tags(path: &Path, edit: &TagEdit) -> Result<(), String> {
+    let mut tagged = lofty::read_from_path(path).map_err(|e| e.to_string())?;
+    if tagged.primary_tag().is_none() {
+        // Start the file's main tag from whatever older tag it has (an MP3's ID3v1, say),
+        // so the fields we're not changing aren't lost when reading switches to it
+        let mut tag = Tag::new(tagged.primary_tag_type());
+        if let Some(old) = tagged.first_tag() {
+            for key in [ItemKey::TrackTitle, ItemKey::TrackArtist, ItemKey::AlbumTitle, ItemKey::Genre, ItemKey::AlbumArtist] {
+                if let Some(v) = old.get_string(key.clone()) {
+                    tag.insert_text(key, v.to_owned());
+                }
+            }
+            if let Some(n) = old.track() {
+                tag.set_track(n);
+            }
+            if let Some(n) = old.disk() {
+                tag.set_disk(n);
+            }
+            if let Some(d) = old.date() {
+                tag.set_date(d);
+            }
+        }
+        tagged.insert_tag(tag);
+    }
+    let Some(tag) = tagged.primary_tag_mut() else {
+        return Err("this file can't hold tags".to_owned());
+    };
+
+    let text = |tag: &mut Tag, value: &Option<String>, set: fn(&mut Tag, String), remove: fn(&mut Tag)| {
+        match value.as_deref().map(str::trim) {
+            Some("") => remove(tag),
+            Some(v) => set(tag, v.to_owned()),
+            None => {}
+        }
+    };
+    text(tag, &edit.title, Tag::set_title, Tag::remove_title);
+    text(tag, &edit.artist, Tag::set_artist, Tag::remove_artist);
+    text(tag, &edit.album, Tag::set_album, Tag::remove_album);
+    text(tag, &edit.genre, Tag::set_genre, Tag::remove_genre);
+    match edit.album_artist.as_deref().map(str::trim) {
+        Some("") => tag.remove_key(ItemKey::AlbumArtist),
+        Some(v) => {
+            tag.insert_text(ItemKey::AlbumArtist, v.to_owned());
+        }
+        None => {}
+    }
+    match edit.year {
+        Some(0) => tag.remove_date(),
+        Some(year) => tag.set_date(lofty::tag::items::Timestamp { year: year as u16, ..Default::default() }),
+        None => {}
+    }
+    match edit.track_number {
+        Some(0) => tag.remove_track(),
+        Some(n) => tag.set_track(n),
+        None => {}
+    }
+    match edit.disc_number {
+        Some(0) => tag.remove_disk(),
+        Some(n) => tag.set_disk(n),
+        None => {}
+    }
+
+    tagged.save_to_path(path, WriteOptions::default()).map_err(|e| e.to_string())
 }
 
 pub fn data_dir() -> PathBuf {

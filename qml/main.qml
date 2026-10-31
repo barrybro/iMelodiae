@@ -14,7 +14,9 @@ Window {
     color: settings.miniPlayer ? Theme.toolbarUpper : Theme.toolbarBottom
     title: player.loaded && nowPlaying.title ? nowPlaying.title + " — iMelodiae" : "iMelodiae"
 
+    // The focused song, and every selected song (Ctrl/Shift-click to select several)
     property int selectedId: -1
+    property var selectedIds: []
     property int playingId: -1
     property var nowPlaying: ({ title: "", artist: "", album: "" })
     property string lcdMessage: ""
@@ -48,6 +50,7 @@ Window {
         property int sourceWidth: 180
         property int browserHeight: 140
         property string columnWidths: "{}"
+        property string columnOrder: "" // JSON array of shown column roles; empty = default
         property string audioOutput: "" // device node name; empty = system default
         property bool lyricsVisible: true
         property int lyricsWidth: 280
@@ -91,6 +94,11 @@ Window {
     LibraryModel {
         id: library
         onStatusChanged: window.flash(status)
+        // Show edited tags for the playing song straight away
+        onTagsEdited: {
+            if (window.playingId >= 0)
+                window.nowPlaying = JSON.parse(library.trackInfo(window.playingId))
+        }
         Component.onCompleted: Qt.callLater(() => library.importDefaultFolder())
     }
 
@@ -106,6 +114,11 @@ Window {
         id: messageTimer
         interval: 4000
         onTriggered: if (!library.scanning) window.lcdMessage = ""
+    }
+
+    function select(ids, current) {
+        selectedIds = ids
+        selectedId = current
     }
 
     function flash(message) {
@@ -178,6 +191,7 @@ Window {
         window.height = window.height
         equalizer.close()
         outputMenu.close()
+        songInfo.close()
         if (mini)
             search.text = ""
         settings.miniPlayer = mini
@@ -195,6 +209,17 @@ Window {
         })
     }
 
+    function showInfo(ids) {
+        if (ids.length === 0)
+            return
+        songInfo.load(ids.map(id => JSON.parse(library.trackInfo(id))), library.distinctValues("genre"))
+        if (!songInfo.opened) {
+            songInfo.x = (window.width - songInfo.width) / 2
+            songInfo.y = Math.max(0, (window.height - songInfo.height) / 3)
+            songInfo.open()
+        }
+    }
+
     function snapback() {
         if (playingId < 0)
             return
@@ -203,7 +228,7 @@ Window {
             library.source = 0
             library.genre = ""
         }
-        selectedId = playingId
+        select([playingId], playingId)
         trackList.reveal(playingId)
     }
 
@@ -463,12 +488,16 @@ Window {
                 width: parent.width
                 tracks: library
                 selectedId: window.selectedId
+                selectedIds: window.selectedIds
                 playingId: window.playingId
                 playing: player.playing
                 widths: JSON.parse(settings.columnWidths)
-                onSelected: id => window.selectedId = id
+                order: settings.columnOrder ? JSON.parse(settings.columnOrder) : trackList.defaultOrder
+                onSelectionEdited: (ids, current) => window.select(ids, current)
                 onActivated: id => window.playId(id)
                 onWidthsEdited: widths => settings.columnWidths = JSON.stringify(widths)
+                onOrderEdited: order => settings.columnOrder = JSON.stringify(order)
+                onInfoRequested: ids => window.showInfo(ids)
             }
         }
 
@@ -613,7 +642,7 @@ Window {
         repeatMode: settings.repeatMode
         volume: settings.volume
         onPlayRequested: id => {
-            window.selectedId = id
+            window.select([id], id)
             window.playId(id)
         }
         onPlayPauseRequested: window.playPause()
@@ -640,6 +669,15 @@ Window {
             settings.eqBands = JSON.stringify(bands)
             settings.eqEnabled = enabled
         }
+    }
+
+    SongInfoPanel {
+        id: songInfo
+        artworkSource: {
+            void library.artworkRevision
+            return opened && info.id !== undefined ? library.artworkUrl(info.id) : ""
+        }
+        onSaveRequested: (ids, edit) => library.editTags(JSON.stringify(ids), JSON.stringify(edit))
     }
 
     OutputMenu {
@@ -689,6 +727,11 @@ Window {
     Shortcut { sequences: [StandardKey.Open]; onActivated: folderDialog.open() }
     Shortcut { sequence: "Ctrl+B"; onActivated: settings.browserVisible = !settings.browserVisible }
     Shortcut { sequence: "Ctrl+L"; onActivated: window.snapback() }
+    Shortcut {
+        sequence: "Ctrl+I"
+        enabled: !settings.miniPlayer
+        onActivated: window.showInfo(window.selectedIds)
+    }
     Shortcut { sequences: [StandardKey.Quit]; onActivated: Qt.quit() }
 
     // Developer aid: `imelodiae --play --screenshot=out.png` renders the window and quits
@@ -715,7 +758,7 @@ Window {
                 screenshotTimer.start()
             } else if (arg === "--play") {
                 Qt.callLater(() => Qt.callLater(() => {
-                    window.selectedId = library.idAt(1)
+                    window.select([library.idAt(1)], library.idAt(1))
                     window.playPause()
                 }))
             }

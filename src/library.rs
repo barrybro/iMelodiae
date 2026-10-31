@@ -128,6 +128,24 @@ pub mod qobject {
         /// Bump play count / last played when a song finishes
         #[qinvokable]
         fn mark_played(self: Pin<&mut LibraryModel>, id: i32);
+
+        /// The `count` longest texts a column shows in the current view, so the list can
+        /// fit the column by measuring just these
+        #[qinvokable]
+        fn longest_values(self: &LibraryModel, role: &QString, count: i32) -> QStringList;
+
+        /// Every different value a text column has across the whole library, sorted
+        #[qinvokable]
+        fn distinct_values(self: &LibraryModel, role: &QString) -> QStringList;
+
+        /// Write tag changes (a JSON TagEdit) into the files of some tracks (a JSON array
+        /// of ids) in the background, then re-read them
+        #[qinvokable]
+        fn edit_tags(self: Pin<&mut LibraryModel>, ids_json: &QString, edit_json: &QString);
+
+        /// Edited tags have been saved and re-read
+        #[qsignal]
+        fn tags_edited(self: Pin<&mut LibraryModel>);
     }
 
     impl cxx_qt::Threading for LibraryModel {}
@@ -163,6 +181,8 @@ const ROLES: &[&str] = &[
     "playCount",
     "bitRate",
     "sampleRate",
+    "dateAdded",
+    "lastPlayed",
 ];
 const USER_ROLE: i32 = 0x0100;
 
@@ -237,6 +257,26 @@ impl cxx_qt::Initialize for qobject::LibraryModel {
     }
 }
 
+/// What a song list cell shows for a text column role (None for other roles)
+fn cell_text(t: &Track, role: &str) -> Option<String> {
+    let number = |n: u32| if n == 0 { String::new() } else { n.to_string() };
+    Some(match role {
+        "title" => t.title.clone(),
+        "artist" => t.artist.clone(),
+        "album" => t.album.clone(),
+        "genre" => t.genre.clone(),
+        "kind" => t.kind.clone(),
+        "time" => scanner::format_time(t.duration_ms),
+        "trackNumber" => number(t.track_number),
+        "year" => number(t.year),
+        "playCount" => number(t.play_count),
+        "bitRate" if t.bitrate == 0 => String::new(),
+        "bitRate" => format!("{} kbps", scanner::group_thousands(t.bitrate as usize)),
+        "sampleRate" => format!("{:.1} kHz", t.sample_rate as f64 / 1000.0),
+        _ => return None,
+    })
+}
+
 fn display_artist(t: &Track) -> &str {
     if !t.album_artist.is_empty() {
         &t.album_artist
@@ -309,6 +349,11 @@ pub struct SearchIndex {
     artist: Vec<String>,
     album: Vec<String>,
     genre: Vec<String>,
+    /// Which copy of an album a track belongs to, so songs sorted by album stay together
+    /// in track order: its folder, plus its album artist. A compilation in one folder
+    /// stays together without an album artist; same-named albums by different artists
+    /// (two "Greatest Hits") don't merge.
+    album_group: Vec<String>,
     /// Live track ids in Library order: artist, album, disc, track
     library_order: Vec<usize>,
     /// Each id's position in `library_order`, used to break ties in column sorts
@@ -332,6 +377,13 @@ impl SearchIndex {
             artist: lower(|t| &t.artist),
             album: lower(|t| &t.album),
             genre: lower(|t| &t.genre),
+            album_group: tracks
+                .iter()
+                .map(|t| {
+                    let folder = Path::new(&t.path).parent().map(|p| p.to_string_lossy()).unwrap_or_default();
+                    format!("{folder}\u{1}{}", t.album_artist.to_lowercase())
+                })
+                .collect(),
             ..Default::default()
         };
 
@@ -431,7 +483,7 @@ pub fn compute_view(tracks: &[Track], index: &SearchIndex, f: &Filters) -> ViewR
     let by: Option<TrackOrder> = match f.sort_column.as_str() {
         "" => None,
         "title" => Some(Box::new(|a, b| text(&index.title, a, b))),
-        "artist" => Some(Box::new(|_, _| Ordering::Equal)),
+        "artist" => Some(Box::new(|a, b| text(&index.display_artist, a, b))),
         "album" => Some(Box::new(|a, b| text(&index.album, a, b))),
         "genre" => Some(Box::new(|a, b| text(&index.genre, a, b))),
         "time" => Some(Box::new(|a, b| tracks[a].duration_ms.cmp(&tracks[b].duration_ms))),
@@ -440,12 +492,29 @@ pub fn compute_view(tracks: &[Track], index: &SearchIndex, f: &Filters) -> ViewR
         "playCount" => Some(Box::new(|a, b| tracks[a].play_count.cmp(&tracks[b].play_count))),
         "trackNumber" => Some(Box::new(|a, b| tracks[a].track_number.cmp(&tracks[b].track_number))),
         "bitRate" => Some(Box::new(|a, b| tracks[a].bitrate.cmp(&tracks[b].bitrate))),
+        "sampleRate" => Some(Box::new(|a, b| tracks[a].sample_rate.cmp(&tracks[b].sample_rate))),
+        "dateAdded" => Some(Box::new(|a, b| tracks[a].date_added.cmp(&tracks[b].date_added))),
+        "lastPlayed" => Some(Box::new(|a, b| tracks[a].last_played.cmp(&tracks[b].last_played))),
         _ => None,
     };
+    // Within an album, always disc then track order
+    let album_order = |a: usize, b: usize| {
+        index.album_group[a]
+            .cmp(&index.album_group[b])
+            .then(tracks[a].disc_number.cmp(&tracks[b].disc_number))
+            .then(tracks[a].track_number.cmp(&tracks[b].track_number))
+            .then_with(|| index.title[a].cmp(&index.title[b]))
+    };
     if let Some(by) = by {
-        view.sort_by(|&a, &b| by(a, b).then(index.rank[a].cmp(&index.rank[b])));
-    }
-    if !f.ascending {
+        // Only the sorted column runs backwards when descending; ties stay in their
+        // natural order, so albums still play from track 1
+        let by_album = f.sort_column == "album";
+        view.sort_by(|&a, &b| {
+            let primary = if f.ascending { by(a, b) } else { by(b, a) };
+            let primary = if by_album { primary.then_with(|| album_order(a, b)) } else { primary };
+            primary.then(index.rank[a].cmp(&index.rank[b]))
+        });
+    } else if !f.ascending {
         view.reverse();
     }
 
@@ -807,11 +876,20 @@ impl qobject::LibraryModel {
             "path": t.path,
             "title": t.title,
             "artist": t.artist,
+            "albumArtist": t.album_artist,
             "album": t.album,
             "genre": t.genre,
             "kind": t.kind,
             "year": t.year,
+            "trackNumber": t.track_number,
+            "discNumber": t.disc_number,
             "durationMs": t.duration_ms,
+            "bitRate": t.bitrate,
+            "sampleRate": t.sample_rate,
+            "size": t.size,
+            "playCount": t.play_count,
+            "lastPlayed": t.last_played,
+            "dateAdded": t.date_added,
         });
         QString::from(info.to_string())
     }
@@ -943,37 +1021,97 @@ impl qobject::LibraryModel {
             return QVariant::default();
         };
         let t = &self.tracks[id];
-        let number = |n: u32| {
-            if n == 0 {
-                QVariant::from(&QString::default())
-            } else {
-                QVariant::from(&QString::from(n.to_string()))
-            }
-        };
         match ROLES.get((role - USER_ROLE) as usize).copied() {
             Some("trackId") => QVariant::from(&(id as i32)),
-            Some("title") => QVariant::from(&QString::from(t.title.as_str())),
-            Some("artist") => QVariant::from(&QString::from(t.artist.as_str())),
-            Some("album") => QVariant::from(&QString::from(t.album.as_str())),
-            Some("genre") => QVariant::from(&QString::from(t.genre.as_str())),
-            Some("kind") => QVariant::from(&QString::from(t.kind.as_str())),
-            Some("time") => QVariant::from(&QString::from(scanner::format_time(t.duration_ms))),
-            Some("trackNumber") => number(t.track_number),
-            Some("year") => number(t.year),
-            Some("playCount") => number(t.play_count),
-            Some("bitRate") => {
-                if t.bitrate == 0 {
-                    QVariant::from(&QString::default())
-                } else {
-                    let kbps = scanner::group_thousands(t.bitrate as usize);
-                    QVariant::from(&QString::from(format!("{kbps} kbps")))
+            // Seconds since the epoch (0 = never), formatted for the locale in QML
+            Some("dateAdded") => QVariant::from(&(t.date_added as f64)),
+            Some("lastPlayed") => QVariant::from(&(t.last_played as f64)),
+            Some(name) => cell_text(t, name)
+                .map(|text| QVariant::from(&QString::from(text)))
+                .unwrap_or_default(),
+            None => QVariant::default(),
+        }
+    }
+
+    pub fn distinct_values(&self, role: &QString) -> QStringList {
+        let role = role.to_string();
+        let mut seen = HashSet::new();
+        let mut values: Vec<String> = self
+            .tracks
+            .iter()
+            .filter(|t| !t.removed)
+            .filter_map(|t| cell_text(t, &role))
+            .filter(|v| !v.is_empty() && seen.insert(v.to_lowercase()))
+            .collect();
+        values.sort_by_cached_key(|v| v.to_lowercase());
+        to_qstringlist(values)
+    }
+
+    pub fn edit_tags(mut self: Pin<&mut Self>, ids_json: &QString, edit_json: &QString) {
+        let Ok(edit) = serde_json::from_str::<scanner::TagEdit>(&edit_json.to_string()) else {
+            return;
+        };
+        let ids: Vec<i32> = serde_json::from_str(&ids_json.to_string()).unwrap_or_default();
+        let paths: Vec<String> = ids
+            .iter()
+            .filter_map(|&id| self.track(id))
+            .filter(|t| !t.removed)
+            .map(|t| t.path.clone())
+            .collect();
+        let total = paths.len();
+        if total == 0 {
+            return;
+        }
+        let songs = |n: usize| if n == 1 { "1 song".to_owned() } else { format!("{} songs", scanner::group_thousands(n)) };
+        self.as_mut().set_status_text(format!("Saving {}…", songs(total)));
+
+        let thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let mut upserts = Vec::new();
+            let mut failed: Vec<String> = Vec::new();
+            let mut reported = std::time::Instant::now();
+            for (i, path) in paths.iter().enumerate() {
+                match scanner::write_tags(Path::new(path), &edit) {
+                    Ok(()) => upserts.extend(scanner::read_track(Path::new(path))),
+                    Err(err) => failed.push(format!("{}: {err}", Path::new(path).display())),
+                }
+                if reported.elapsed().as_secs() >= 1 {
+                    reported = std::time::Instant::now();
+                    let done = i + 1;
+                    let _ = thread.queue(move |model: Pin<&mut qobject::LibraryModel>| {
+                        model.set_status_text(format!("Saving {done} of {total}…"));
+                    });
                 }
             }
-            Some("sampleRate") => {
-                QVariant::from(&QString::from(format!("{:.1} kHz", t.sample_rate as f64 / 1000.0)))
-            }
-            _ => QVariant::default(),
-        }
+            let _ = thread.queue(move |mut model: Pin<&mut qobject::LibraryModel>| {
+                let saved = upserts.len();
+                model.as_mut().apply_changes(Changes { upserts, ..Default::default() });
+                let msg = match failed.first() {
+                    None => format!("Updated {}", songs(saved)),
+                    Some(first) => {
+                        for f in &failed {
+                            eprintln!("iMelodiae: couldn't save tags to {f}");
+                        }
+                        format!("Couldn't save {} of {total} — {first}", failed.len())
+                    }
+                };
+                model.as_mut().set_status_text(msg);
+                model.as_mut().tags_edited();
+            });
+        });
+    }
+
+    pub fn longest_values(&self, role: &QString, count: i32) -> QStringList {
+        let role = role.to_string();
+        let mut values: Vec<String> = self
+            .view
+            .iter()
+            .filter_map(|&id| cell_text(&self.tracks[id], &role))
+            .collect();
+        values.sort_unstable_by(|a, b| b.chars().count().cmp(&a.chars().count()).then_with(|| a.cmp(b)));
+        values.dedup();
+        values.truncate(count.max(0) as usize);
+        to_qstringlist(values)
     }
 
     pub fn role_names(&self) -> QHash<QHashPair_i32_QByteArray> {
@@ -1124,5 +1262,44 @@ mod tests {
         );
         f.ascending = false;
         assert_eq!(titles(&compute_view(&tracks, &index, &f))[0], "Untitled");
+    }
+
+    #[test]
+    fn album_sort_keeps_track_order() {
+        let at = |title: &str, artist: &str, album: &str, folder: &str, disc: u32, number: u32| Track {
+            path: format!("/music/{folder}/{title}.flac"),
+            disc_number: disc,
+            ..track(title, artist, album, "", number)
+        };
+        let tracks = vec![
+            // A compilation with no album artist: different artists, one folder
+            at("Comp 3", "Zed", "Hits of 1999", "hits99", 1, 3),
+            at("Comp 1", "Alpha", "Hits of 1999", "hits99", 1, 1),
+            at("Comp 2", "Mid", "Hits of 1999", "hits99", 1, 2),
+            // Two different albums with the same name
+            at("ABBA 2", "ABBA", "Greatest Hits", "abba", 1, 2),
+            at("Queen 1", "Queen", "Greatest Hits", "queen", 1, 1),
+            at("ABBA 1", "ABBA", "Greatest Hits", "abba", 1, 1),
+            // Two discs
+            at("D2 T1", "Band", "Double", "double", 2, 1),
+            at("D1 T2", "Band", "Double", "double", 1, 2),
+            at("D1 T1", "Band", "Double", "double", 1, 1),
+        ];
+        let index = SearchIndex::build(&tracks);
+        let titles = |r: &ViewResult| r.view.iter().map(|&i| tracks[i].title.as_str()).collect::<Vec<_>>();
+
+        let mut f = filters("");
+        f.sort_column = "album".into();
+        assert_eq!(
+            titles(&compute_view(&tracks, &index, &f)),
+            ["D1 T1", "D1 T2", "D2 T1", "ABBA 1", "ABBA 2", "Queen 1", "Comp 1", "Comp 2", "Comp 3"]
+        );
+
+        // Albums run backwards, songs within each still from track 1
+        f.ascending = false;
+        assert_eq!(
+            titles(&compute_view(&tracks, &index, &f)),
+            ["Comp 1", "Comp 2", "Comp 3", "ABBA 1", "ABBA 2", "Queen 1", "D1 T1", "D1 T2", "D2 T1"]
+        );
     }
 }
