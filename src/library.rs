@@ -349,6 +349,11 @@ pub struct SearchIndex {
     artist: Vec<String>,
     album: Vec<String>,
     genre: Vec<String>,
+    /// Which copy of an album a track belongs to, so songs sorted by album stay together
+    /// in track order: its folder, plus its album artist. A compilation in one folder
+    /// stays together without an album artist; same-named albums by different artists
+    /// (two "Greatest Hits") don't merge.
+    album_group: Vec<String>,
     /// Live track ids in Library order: artist, album, disc, track
     library_order: Vec<usize>,
     /// Each id's position in `library_order`, used to break ties in column sorts
@@ -372,6 +377,13 @@ impl SearchIndex {
             artist: lower(|t| &t.artist),
             album: lower(|t| &t.album),
             genre: lower(|t| &t.genre),
+            album_group: tracks
+                .iter()
+                .map(|t| {
+                    let folder = Path::new(&t.path).parent().map(|p| p.to_string_lossy()).unwrap_or_default();
+                    format!("{folder}\u{1}{}", t.album_artist.to_lowercase())
+                })
+                .collect(),
             ..Default::default()
         };
 
@@ -471,7 +483,7 @@ pub fn compute_view(tracks: &[Track], index: &SearchIndex, f: &Filters) -> ViewR
     let by: Option<TrackOrder> = match f.sort_column.as_str() {
         "" => None,
         "title" => Some(Box::new(|a, b| text(&index.title, a, b))),
-        "artist" => Some(Box::new(|_, _| Ordering::Equal)),
+        "artist" => Some(Box::new(|a, b| text(&index.display_artist, a, b))),
         "album" => Some(Box::new(|a, b| text(&index.album, a, b))),
         "genre" => Some(Box::new(|a, b| text(&index.genre, a, b))),
         "time" => Some(Box::new(|a, b| tracks[a].duration_ms.cmp(&tracks[b].duration_ms))),
@@ -485,10 +497,24 @@ pub fn compute_view(tracks: &[Track], index: &SearchIndex, f: &Filters) -> ViewR
         "lastPlayed" => Some(Box::new(|a, b| tracks[a].last_played.cmp(&tracks[b].last_played))),
         _ => None,
     };
+    // Within an album, always disc then track order
+    let album_order = |a: usize, b: usize| {
+        index.album_group[a]
+            .cmp(&index.album_group[b])
+            .then(tracks[a].disc_number.cmp(&tracks[b].disc_number))
+            .then(tracks[a].track_number.cmp(&tracks[b].track_number))
+            .then_with(|| index.title[a].cmp(&index.title[b]))
+    };
     if let Some(by) = by {
-        view.sort_by(|&a, &b| by(a, b).then(index.rank[a].cmp(&index.rank[b])));
-    }
-    if !f.ascending {
+        // Only the sorted column runs backwards when descending; ties stay in their
+        // natural order, so albums still play from track 1
+        let by_album = f.sort_column == "album";
+        view.sort_by(|&a, &b| {
+            let primary = if f.ascending { by(a, b) } else { by(b, a) };
+            let primary = if by_album { primary.then_with(|| album_order(a, b)) } else { primary };
+            primary.then(index.rank[a].cmp(&index.rank[b]))
+        });
+    } else if !f.ascending {
         view.reverse();
     }
 
@@ -1236,5 +1262,44 @@ mod tests {
         );
         f.ascending = false;
         assert_eq!(titles(&compute_view(&tracks, &index, &f))[0], "Untitled");
+    }
+
+    #[test]
+    fn album_sort_keeps_track_order() {
+        let at = |title: &str, artist: &str, album: &str, folder: &str, disc: u32, number: u32| Track {
+            path: format!("/music/{folder}/{title}.flac"),
+            disc_number: disc,
+            ..track(title, artist, album, "", number)
+        };
+        let tracks = vec![
+            // A compilation with no album artist: different artists, one folder
+            at("Comp 3", "Zed", "Hits of 1999", "hits99", 1, 3),
+            at("Comp 1", "Alpha", "Hits of 1999", "hits99", 1, 1),
+            at("Comp 2", "Mid", "Hits of 1999", "hits99", 1, 2),
+            // Two different albums with the same name
+            at("ABBA 2", "ABBA", "Greatest Hits", "abba", 1, 2),
+            at("Queen 1", "Queen", "Greatest Hits", "queen", 1, 1),
+            at("ABBA 1", "ABBA", "Greatest Hits", "abba", 1, 1),
+            // Two discs
+            at("D2 T1", "Band", "Double", "double", 2, 1),
+            at("D1 T2", "Band", "Double", "double", 1, 2),
+            at("D1 T1", "Band", "Double", "double", 1, 1),
+        ];
+        let index = SearchIndex::build(&tracks);
+        let titles = |r: &ViewResult| r.view.iter().map(|&i| tracks[i].title.as_str()).collect::<Vec<_>>();
+
+        let mut f = filters("");
+        f.sort_column = "album".into();
+        assert_eq!(
+            titles(&compute_view(&tracks, &index, &f)),
+            ["D1 T1", "D1 T2", "D2 T1", "ABBA 1", "ABBA 2", "Queen 1", "Comp 1", "Comp 2", "Comp 3"]
+        );
+
+        // Albums run backwards, songs within each still from track 1
+        f.ascending = false;
+        assert_eq!(
+            titles(&compute_view(&tracks, &index, &f)),
+            ["Comp 1", "Comp 2", "Comp 3", "ABBA 1", "ABBA 2", "Queen 1", "D1 T1", "D1 T2", "D2 T1"]
+        );
     }
 }
