@@ -116,15 +116,20 @@ Rectangle {
             for (const c of columns)
                 if (c.role !== "title")
                     others += widthOf(c)
-            const fitted = list.width - others
+            const fitted = list.width - gutter - others
             return Math.max(widths.title ?? 140, fitted)
         }
         return col.fixed ? col.width : (widths[col.role] ?? col.width)
     }
 
+    // The scroll bars float over the list, so leave room for them beside the last column
+    // and below the last row while they're showing (they show whenever there's overflow)
+    readonly property real gutter: vbar.size < 1.0 ? vbar.width : 0
+    readonly property real footer: hbar.size < 1.0 ? hbar.height : 0
+
     // Every column's x and width, computed once per resize rather than in every cell
     readonly property var layout: {
-        void widths; void list.width
+        void widths; void list.width; void gutter
         let x = 0
         const out = []
         for (const c of columns) {
@@ -137,7 +142,7 @@ Rectangle {
 
     readonly property real totalWidth: {
         // Depend on widths and list width so this re-evaluates on resize
-        void widths; void list.width
+        void widths; void list.width; void gutter
         let sum = 0
         for (const c of columns)
             sum += widthOf(c)
@@ -326,11 +331,12 @@ Rectangle {
         cacheBuffer: 0
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.AutoFlickIfNeeded
-        contentWidth: root.totalWidth
+        contentWidth: root.totalWidth + root.gutter
+        bottomMargin: root.footer
         keyNavigationEnabled: false
         activeFocusOnTab: true
-        ScrollBar.vertical: AquaScrollBar {}
-        ScrollBar.horizontal: AquaScrollBar {}
+        ScrollBar.vertical: AquaScrollBar { id: vbar }
+        ScrollBar.horizontal: AquaScrollBar { id: hbar }
 
         // Stripes continue below the last song, like a real Aqua table
         Rectangle {
