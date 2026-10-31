@@ -309,13 +309,23 @@ Rectangle {
                             if (mouse.button !== Qt.LeftButton)
                                 return
                             if (cell.dragging) {
-                                root.moveColumn(root.dragRole, root.dropSlot)
+                                // Reordering rebuilds every header cell, this one included, so
+                                // finish the drag first and move once this handler has returned.
+                                // Otherwise the rebuilt cell can come back still marked as
+                                // dragged and drawn shifted over its neighbour.
+                                const role = root.dragRole
+                                const slot = root.dropSlot
                                 root.dragRole = ""
+                                root.dragOffset = 0
+                                Qt.callLater(() => root.moveColumn(role, slot))
                             } else if (cell.modelData.role !== "status" && containsMouse) {
                                 root.tracks.sortBy(cell.modelData.role)
                             }
                         }
-                        onCanceled: root.dragRole = ""
+                        onCanceled: {
+                            root.dragRole = ""
+                            root.dragOffset = 0
+                        }
                     }
 
                     // Drag the right edge to resize
