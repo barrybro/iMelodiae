@@ -163,6 +163,8 @@ const ROLES: &[&str] = &[
     "playCount",
     "bitRate",
     "sampleRate",
+    "dateAdded",
+    "lastPlayed",
 ];
 const USER_ROLE: i32 = 0x0100;
 
@@ -440,6 +442,9 @@ pub fn compute_view(tracks: &[Track], index: &SearchIndex, f: &Filters) -> ViewR
         "playCount" => Some(Box::new(|a, b| tracks[a].play_count.cmp(&tracks[b].play_count))),
         "trackNumber" => Some(Box::new(|a, b| tracks[a].track_number.cmp(&tracks[b].track_number))),
         "bitRate" => Some(Box::new(|a, b| tracks[a].bitrate.cmp(&tracks[b].bitrate))),
+        "sampleRate" => Some(Box::new(|a, b| tracks[a].sample_rate.cmp(&tracks[b].sample_rate))),
+        "dateAdded" => Some(Box::new(|a, b| tracks[a].date_added.cmp(&tracks[b].date_added))),
+        "lastPlayed" => Some(Box::new(|a, b| tracks[a].last_played.cmp(&tracks[b].last_played))),
         _ => None,
     };
     if let Some(by) = by {
@@ -807,11 +812,20 @@ impl qobject::LibraryModel {
             "path": t.path,
             "title": t.title,
             "artist": t.artist,
+            "albumArtist": t.album_artist,
             "album": t.album,
             "genre": t.genre,
             "kind": t.kind,
             "year": t.year,
+            "trackNumber": t.track_number,
+            "discNumber": t.disc_number,
             "durationMs": t.duration_ms,
+            "bitRate": t.bitrate,
+            "sampleRate": t.sample_rate,
+            "size": t.size,
+            "playCount": t.play_count,
+            "lastPlayed": t.last_played,
+            "dateAdded": t.date_added,
         });
         QString::from(info.to_string())
     }
@@ -972,6 +986,9 @@ impl qobject::LibraryModel {
             Some("sampleRate") => {
                 QVariant::from(&QString::from(format!("{:.1} kHz", t.sample_rate as f64 / 1000.0)))
             }
+            // Seconds since the epoch (0 = never), formatted for the locale in QML
+            Some("dateAdded") => QVariant::from(&(t.date_added as f64)),
+            Some("lastPlayed") => QVariant::from(&(t.last_played as f64)),
             _ => QVariant::default(),
         }
     }

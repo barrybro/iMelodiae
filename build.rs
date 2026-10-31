@@ -22,6 +22,8 @@ fn main() {
                 "qml/LyricsPane.qml",
                 "qml/EqualizerPanel.qml",
                 "qml/IPod.qml",
+                "qml/ContextMenu.qml",
+                "qml/SongInfoPanel.qml",
             ]),
     )
     .qt_module("Quick")

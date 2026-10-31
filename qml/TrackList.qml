@@ -12,27 +12,103 @@ Rectangle {
     property bool playing: false
     // Column widths by role, persisted by the window
     property var widths: ({})
+    // Shown columns by role, left to right (the status column always comes first)
+    property var order: defaultOrder
     // Set before an update that shouldn't move the list (play counts, imports)
     property bool preserveScroll: false
 
     signal activated(int trackId)
     signal selected(int trackId)
     signal widthsEdited(var widths)
+    signal orderEdited(var order)
+    signal infoRequested(int trackId)
 
     color: "white"
     clip: true
 
-    readonly property var columns: [
-        { role: "status", title: "", width: 20, fixed: true },
+    // Every column the list can show, in the order the header's menu lists them
+    readonly property var catalog: [
         { role: "title", title: qsTr("Song Name"), width: 0 },
         { role: "time", title: qsTr("Time"), width: 52, align: Text.AlignRight },
         { role: "artist", title: qsTr("Artist"), width: 140 },
         { role: "album", title: qsTr("Album"), width: 150 },
         { role: "genre", title: qsTr("Genre"), width: 90 },
+        { role: "year", title: qsTr("Year"), width: 46, align: Text.AlignRight },
+        { role: "trackNumber", title: qsTr("Track #"), width: 56, align: Text.AlignRight },
         { role: "kind", title: qsTr("Kind"), width: 140 },
         { role: "bitRate", title: qsTr("Bit Rate"), width: 80, align: Text.AlignRight },
-        { role: "playCount", title: qsTr("Play Count"), width: 72, align: Text.AlignRight }
+        { role: "sampleRate", title: qsTr("Sample Rate"), width: 84, align: Text.AlignRight },
+        { role: "playCount", title: qsTr("Play Count"), width: 72, align: Text.AlignRight },
+        { role: "lastPlayed", title: qsTr("Last Played"), width: 130 },
+        { role: "dateAdded", title: qsTr("Date Added"), width: 130 }
     ]
+    readonly property var defaultOrder: ["title", "time", "artist", "album", "genre", "kind", "bitRate", "playCount"]
+    readonly property var statusColumn: ({ role: "status", title: "", width: 20, fixed: true })
+
+    // Shown columns, status first. Song Name is always shown; unknown roles are dropped.
+    readonly property var columns: {
+        const byRole = {}
+        for (const c of catalog)
+            byRole[c.role] = c
+        const roles = order.filter((r, i) => byRole[r] && order.indexOf(r) === i)
+        if (!roles.includes("title"))
+            roles.unshift("title")
+        return [statusColumn].concat(roles.map(r => byRole[r]))
+    }
+    // Position of each shown column by role
+    readonly property var columnIndex: {
+        const out = {}
+        columns.forEach((c, i) => out[c.role] = i)
+        return out
+    }
+    function shownRoles() {
+        return columns.slice(1).map(c => c.role)
+    }
+
+    function toggleColumn(role) {
+        const roles = shownRoles()
+        const i = roles.indexOf(role)
+        if (i >= 0)
+            roles.splice(i, 1)
+        else
+            roles.push(role)
+        orderEdited(roles)
+    }
+
+    // Header drag-to-rearrange: the column being dragged, how far, and where it would land
+    property string dragRole: ""
+    property real dragOffset: 0
+    property int dropSlot: -1
+
+    // Where a column dropped at content x would go, as an index into the other shown
+    // columns: the number of them whose middle is left of x
+    function slotAt(x) {
+        let slot = 0
+        for (let i = 1; i < columns.length; ++i) {
+            if (columns[i].role === dragRole)
+                continue
+            if (layout[i].x + layout[i].width / 2 < x)
+                ++slot
+        }
+        return slot
+    }
+    function moveColumn(role, slot) {
+        const roles = shownRoles().filter(r => r !== role)
+        roles.splice(slot, 0, role)
+        orderEdited(roles)
+    }
+    // Content x of the drop marker for a slot
+    function slotX(slot) {
+        const others = []
+        for (let i = 1; i < columns.length; ++i)
+            if (columns[i].role !== dragRole)
+                others.push(i)
+        return slot >= 0 && slot < others.length ? layout[others[slot]].x : totalWidth
+    }
+
+    function formatDate(secs) {
+        return secs > 0 ? new Date(secs * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat) : ""
+    }
 
     function widthOf(col) {
         if (col.role === "title") {
@@ -96,6 +172,7 @@ Rectangle {
         z: 2
 
         Row {
+            id: headerContent
             x: -list.contentX
             Repeater {
                 model: root.columns
@@ -108,9 +185,45 @@ Rectangle {
                     alignment: modelData.align ?? Text.AlignLeft
                     sorted: modelData.role !== "status" && root.tracks.sortColumn === modelData.role
                     ascending: root.tracks.sortAscending
-                    onClicked: {
-                        if (modelData.role !== "status")
-                            root.tracks.sortBy(modelData.role)
+
+                    readonly property bool dragging: root.dragRole === modelData.role
+                    z: dragging ? 1 : 0
+                    opacity: dragging ? 0.75 : 1
+                    transform: Translate { x: cell.dragging ? root.dragOffset : 0 }
+
+                    // Click to sort, drag sideways to move, right-click for the column menu
+                    MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        property real startX
+                        onPressed: mouse => {
+                            if (mouse.button === Qt.RightButton) {
+                                columnMenu.popupAt(cell, mouse.x, mouse.y)
+                                return
+                            }
+                            startX = mapToItem(root, mouse.x, 0).x
+                        }
+                        onPositionChanged: mouse => {
+                            if (cell.modelData.role === "status")
+                                return
+                            const dx = mapToItem(root, mouse.x, 0).x - startX
+                            if (!cell.dragging && Math.abs(dx) < 5)
+                                return
+                            root.dragRole = cell.modelData.role
+                            root.dragOffset = dx
+                            root.dropSlot = root.slotAt(mapToItem(headerContent, mouse.x, 0).x)
+                        }
+                        onReleased: mouse => {
+                            if (mouse.button !== Qt.LeftButton)
+                                return
+                            if (cell.dragging) {
+                                root.moveColumn(root.dragRole, root.dropSlot)
+                                root.dragRole = ""
+                            } else if (cell.modelData.role !== "status" && containsMouse) {
+                                root.tracks.sortBy(cell.modelData.role)
+                            }
+                        }
+                        onCanceled: root.dragRole = ""
                     }
 
                     // Drag the right edge to resize
@@ -138,9 +251,64 @@ Rectangle {
         }
         // Filler to the right of the last column
         ListHeader {
+            id: filler
             x: root.totalWidth - list.contentX
             width: Math.max(0, parent.width - x)
             height: 17
+            MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.RightButton
+                onPressed: mouse => columnMenu.popupAt(filler, mouse.x, mouse.y)
+            }
+        }
+
+        // Where a dragged column will land
+        Rectangle {
+            visible: root.dragRole !== ""
+            x: root.slotX(root.dropSlot) - list.contentX - 1
+            width: 3
+            height: parent.height
+            z: 3
+            color: Theme.selection
+        }
+    }
+
+    ContextMenu {
+        id: columnMenu
+        items: {
+            const shown = root.columnIndex
+            return root.catalog.map(c => ({
+                label: c.title, action: c.role, checked: shown[c.role] !== undefined,
+                enabled: c.role !== "title"
+            })).concat([{ separator: true }, { label: qsTr("Restore Default Columns"), action: "reset" }])
+        }
+        onTriggered: action => {
+            if (action === "reset")
+                root.orderEdited(root.defaultOrder)
+            else
+                root.toggleColumn(action)
+        }
+    }
+
+    ContextMenu {
+        id: songMenu
+        property int trackId: -1
+        items: [
+            { label: qsTr("Play"), action: "play" },
+            { label: qsTr("Get Info"), action: "info" },
+            { separator: true },
+            { label: qsTr("Show in Folder"), action: "folder" }
+        ]
+        onTriggered: action => {
+            if (action === "play") {
+                root.activated(trackId)
+            } else if (action === "info") {
+                root.infoRequested(trackId)
+            } else if (action === "folder") {
+                const uri = root.tracks.uriOf(trackId)
+                if (uri)
+                    Qt.openUrlExternally(uri.substring(0, uri.lastIndexOf("/")))
+            }
         }
     }
 
@@ -200,10 +368,13 @@ Rectangle {
             height: 17
             color: isSelected ? Theme.selection : (index % 2 ? Theme.rowOdd : Theme.rowEven)
 
+            // One cell per catalog column; hidden columns' cells stay empty and invisible
             component Cell: Text {
-                property int column
-                x: root.layout[column].x + 5
-                width: root.layout[column].width - 11
+                property string role
+                readonly property int column: root.columnIndex[role] ?? -1
+                visible: column >= 0
+                x: visible ? root.layout[column].x + 5 : 0
+                width: visible ? root.layout[column].width - 11 : 0
                 height: row.height
                 verticalAlignment: Text.AlignVCenter
                 textFormat: Text.PlainText
@@ -212,15 +383,19 @@ Rectangle {
                 color: row.isSelected ? Theme.selectionText : Theme.text
                 elide: Text.ElideRight
             }
-            // One cell per entry in `columns` after the status column, in the same order
-            Cell { column: 1; text: row.model.title }
-            Cell { column: 2; text: row.model.time; horizontalAlignment: Text.AlignRight }
-            Cell { column: 3; text: row.model.artist }
-            Cell { column: 4; text: row.model.album }
-            Cell { column: 5; text: row.model.genre }
-            Cell { column: 6; text: row.model.kind }
-            Cell { column: 7; text: row.model.bitRate; horizontalAlignment: Text.AlignRight }
-            Cell { column: 8; text: row.model.playCount; horizontalAlignment: Text.AlignRight }
+            Cell { role: "title"; text: row.model.title }
+            Cell { role: "time"; text: visible ? row.model.time : ""; horizontalAlignment: Text.AlignRight }
+            Cell { role: "artist"; text: visible ? row.model.artist : "" }
+            Cell { role: "album"; text: visible ? row.model.album : "" }
+            Cell { role: "genre"; text: visible ? row.model.genre : "" }
+            Cell { role: "year"; text: visible ? row.model.year : ""; horizontalAlignment: Text.AlignRight }
+            Cell { role: "trackNumber"; text: visible ? row.model.trackNumber : ""; horizontalAlignment: Text.AlignRight }
+            Cell { role: "kind"; text: visible ? row.model.kind : "" }
+            Cell { role: "bitRate"; text: visible ? row.model.bitRate : ""; horizontalAlignment: Text.AlignRight }
+            Cell { role: "sampleRate"; text: visible ? row.model.sampleRate : ""; horizontalAlignment: Text.AlignRight }
+            Cell { role: "playCount"; text: visible ? row.model.playCount : ""; horizontalAlignment: Text.AlignRight }
+            Cell { role: "lastPlayed"; text: visible ? root.formatDate(row.model.lastPlayed) : "" }
+            Cell { role: "dateAdded"; text: visible ? root.formatDate(row.model.dateAdded) : "" }
 
             // Speaker icon, only built for the playing song
             Loader {
@@ -241,11 +416,19 @@ Rectangle {
 
             MouseArea {
                 anchors.fill: parent
-                onPressed: {
+                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                onPressed: mouse => {
                     list.forceActiveFocus()
                     root.selected(row.model.trackId)
+                    if (mouse.button === Qt.RightButton) {
+                        songMenu.trackId = row.model.trackId
+                        songMenu.popupAt(row, mouse.x, mouse.y)
+                    }
                 }
-                onDoubleClicked: root.activated(row.model.trackId)
+                onDoubleClicked: mouse => {
+                    if (mouse.button === Qt.LeftButton)
+                        root.activated(row.model.trackId)
+                }
             }
         }
 

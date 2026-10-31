@@ -48,6 +48,7 @@ Window {
         property int sourceWidth: 180
         property int browserHeight: 140
         property string columnWidths: "{}"
+        property string columnOrder: "" // JSON array of shown column roles; empty = default
         property string audioOutput: "" // device node name; empty = system default
         property bool lyricsVisible: true
         property int lyricsWidth: 280
@@ -178,6 +179,7 @@ Window {
         window.height = window.height
         equalizer.close()
         outputMenu.close()
+        songInfo.close()
         if (mini)
             search.text = ""
         settings.miniPlayer = mini
@@ -193,6 +195,17 @@ Window {
                 trackList.focusList()
             }
         })
+    }
+
+    function showInfo(id) {
+        if (id < 0)
+            return
+        songInfo.info = JSON.parse(library.trackInfo(id))
+        if (!songInfo.opened) {
+            songInfo.x = (window.width - songInfo.width) / 2
+            songInfo.y = Math.max(0, (window.height - songInfo.height) / 3)
+            songInfo.open()
+        }
     }
 
     function snapback() {
@@ -466,9 +479,12 @@ Window {
                 playingId: window.playingId
                 playing: player.playing
                 widths: JSON.parse(settings.columnWidths)
+                order: settings.columnOrder ? JSON.parse(settings.columnOrder) : trackList.defaultOrder
                 onSelected: id => window.selectedId = id
                 onActivated: id => window.playId(id)
                 onWidthsEdited: widths => settings.columnWidths = JSON.stringify(widths)
+                onOrderEdited: order => settings.columnOrder = JSON.stringify(order)
+                onInfoRequested: id => window.showInfo(id)
             }
         }
 
@@ -642,6 +658,14 @@ Window {
         }
     }
 
+    SongInfoPanel {
+        id: songInfo
+        artworkSource: {
+            void library.artworkRevision
+            return opened && info.id !== undefined ? library.artworkUrl(info.id) : ""
+        }
+    }
+
     OutputMenu {
         id: outputMenu
         player: player
@@ -689,6 +713,11 @@ Window {
     Shortcut { sequences: [StandardKey.Open]; onActivated: folderDialog.open() }
     Shortcut { sequence: "Ctrl+B"; onActivated: settings.browserVisible = !settings.browserVisible }
     Shortcut { sequence: "Ctrl+L"; onActivated: window.snapback() }
+    Shortcut {
+        sequence: "Ctrl+I"
+        enabled: !settings.miniPlayer
+        onActivated: window.showInfo(window.selectedId)
+    }
     Shortcut { sequences: [StandardKey.Quit]; onActivated: Qt.quit() }
 
     // Developer aid: `imelodiae --play --screenshot=out.png` renders the window and quits
