@@ -45,6 +45,7 @@ Rectangle {
         { role: "genre", title: qsTr("Genre"), width: 90 },
         { role: "year", title: qsTr("Year"), width: 46, align: Text.AlignRight },
         { role: "trackNumber", title: qsTr("Track #"), width: 56, align: Text.AlignRight },
+        { role: "discNumber", title: qsTr("Disc #"), width: 52, align: Text.AlignRight },
         { role: "kind", title: qsTr("Kind"), width: 140 },
         { role: "bitRate", title: qsTr("Bit Rate"), width: 80, align: Text.AlignRight },
         { role: "sampleRate", title: qsTr("Sample Rate"), width: 84, align: Text.AlignRight },
@@ -499,6 +500,7 @@ Rectangle {
             Cell { role: "genre"; text: visible ? row.model.genre : "" }
             Cell { role: "year"; text: visible ? row.model.year : ""; horizontalAlignment: Text.AlignRight }
             Cell { role: "trackNumber"; text: visible ? row.model.trackNumber : ""; horizontalAlignment: Text.AlignRight }
+            Cell { role: "discNumber"; text: visible ? row.model.discNumber : ""; horizontalAlignment: Text.AlignRight }
             Cell { role: "kind"; text: visible ? row.model.kind : "" }
             Cell { role: "bitRate"; text: visible ? row.model.bitRate : ""; horizontalAlignment: Text.AlignRight }
             Cell { role: "sampleRate"; text: visible ? row.model.sampleRate : ""; horizontalAlignment: Text.AlignRight }
