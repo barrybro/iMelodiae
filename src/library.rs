@@ -51,6 +51,13 @@ pub mod qobject {
         #[qproperty(QStringList, albums, READ, NOTIFY)]
         #[qproperty(QString, sort_column, READ, NOTIFY)]
         #[qproperty(bool, sort_ascending, READ, NOTIFY)]
+        /// Names of the hand-made playlists, in Source-list order; playlist i is source
+        /// SOURCE_FIRST_PLAYLIST + i
+        #[qproperty(QStringList, playlist_names, READ, NOTIFY)]
+        /// The source is a hand-made playlist, so its songs can be reordered and removed
+        #[qproperty(bool, is_playlist, READ, NOTIFY)]
+        /// How many songs the current playlist holds (0 for other sources)
+        #[qproperty(i32, playlist_length, READ, NOTIFY)]
         type LibraryModel = super::LibraryModelRust;
     }
 
@@ -146,6 +153,33 @@ pub mod qobject {
         /// Edited tags have been saved and re-read
         #[qsignal]
         fn tags_edited(self: Pin<&mut LibraryModel>);
+
+        /// Make an "untitled playlist" holding some songs (a JSON array of ids, maybe
+        /// empty); returns its source index
+        #[qinvokable]
+        fn new_playlist(self: Pin<&mut LibraryModel>, ids_json: &QString) -> i32;
+
+        /// Rename a playlist by source index; returns its new source index, since
+        /// playlists are kept in name order
+        #[qinvokable]
+        fn rename_playlist(self: Pin<&mut LibraryModel>, source: i32, name: &QString) -> i32;
+
+        #[qinvokable]
+        fn delete_playlist(self: Pin<&mut LibraryModel>, source: i32);
+
+        /// Add songs (a JSON array of ids) to the end of a playlist, skipping ones it
+        /// already holds; returns how many were added
+        #[qinvokable]
+        fn add_to_playlist(self: Pin<&mut LibraryModel>, source: i32, ids_json: &QString) -> i32;
+
+        /// Take songs (a JSON array of ids) out of the playlist being shown
+        #[qinvokable]
+        fn remove_from_playlist(self: Pin<&mut LibraryModel>, ids_json: &QString);
+
+        /// Move songs (a JSON array of ids) in the playlist being shown to just before
+        /// another song, or to the end when `before_id` is -1
+        #[qinvokable]
+        fn move_in_playlist(self: Pin<&mut LibraryModel>, ids_json: &QString, before_id: i32);
     }
 
     impl cxx_qt::Threading for LibraryModel {}
@@ -153,6 +187,7 @@ pub mod qobject {
 }
 
 use crate::coverart;
+use crate::playlists::{self, Playlist};
 use crate::scanner::{self, Track};
 use crate::watcher::{self, Changes};
 use core::pin::Pin;
@@ -167,6 +202,7 @@ use std::path::{Path, PathBuf};
 pub const SOURCE_RECENTLY_ADDED: i32 = 1;
 pub const SOURCE_TOP_PLAYED: i32 = 2;
 pub const SOURCE_RECENTLY_PLAYED: i32 = 3;
+pub const SOURCE_FIRST_PLAYLIST: i32 = 4;
 
 const ROLES: &[&str] = &[
     "trackId",
@@ -184,6 +220,8 @@ const ROLES: &[&str] = &[
     "sampleRate",
     "dateAdded",
     "lastPlayed",
+    // Place in the playlist being shown, counting from 1
+    "position",
 ];
 const USER_ROLE: i32 = 0x0100;
 
@@ -210,7 +248,14 @@ pub struct LibraryModelRust {
     albums: QStringList,
     sort_column: QString,
     sort_ascending: bool,
+    playlist_names: QStringList,
+    is_playlist: bool,
+    playlist_length: i32,
 
+    /// Hand-made playlists, in Source-list order
+    playlists: Vec<Playlist>,
+    /// Each shown playlist song's place in the playlist, counting from 1
+    positions: HashMap<usize, usize>,
     /// Every track; a track's id is its index here. Deleted tracks are flagged
     /// `removed` rather than taken out, so ids never shift while the app runs.
     tracks: Vec<Track>,
@@ -236,6 +281,8 @@ impl cxx_qt::Initialize for qobject::LibraryModel {
         let folders = watcher::load_folders(&tracks);
         let mut rust = self.as_mut().rust_mut();
         rust.tracks = tracks;
+        rust.playlists = playlists::load();
+        rust.playlist_names = to_qstringlist(rust.playlists.iter().map(|p| p.name.clone()));
         rust.folders = Arc::new(Mutex::new(folders.clone()));
         rust.sort_ascending = true;
         rust.shuffle_state.set(scanner::now_secs() | 1);
@@ -327,6 +374,8 @@ pub struct Filters {
     pub artist: String,
     pub album: String,
     pub source: i32,
+    /// The playlist's songs in order, when the source is a hand-made playlist
+    pub playlist: Option<Vec<usize>>,
     pub sort_column: String,
     pub ascending: bool,
 }
@@ -358,6 +407,8 @@ pub struct SearchIndex {
     album_group: Vec<String>,
     /// Live track ids in Library order: artist, album, disc, track
     library_order: Vec<usize>,
+    /// Live track id for each file path
+    by_path: HashMap<String, usize>,
     /// Each id's position in `library_order`, used to break ties in column sorts
     rank: Vec<usize>,
 }
@@ -407,11 +458,22 @@ impl SearchIndex {
             index.rank[i] = position;
         }
         index.library_order = order;
+        index.by_path = tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.removed)
+            .map(|(i, t)| (t.path.clone(), i))
+            .collect();
         index
     }
 
     pub fn len(&self) -> usize {
         self.rank.len()
+    }
+
+    /// A playlist's songs that are in the library, in playlist order
+    pub fn resolve(&self, paths: &[String]) -> Vec<usize> {
+        paths.iter().filter_map(|p| self.by_path.get(p).copied()).collect()
     }
 }
 
@@ -434,8 +496,9 @@ pub fn compute_view(tracks: &[Track], index: &SearchIndex, f: &Filters) -> ViewR
     let words: Vec<String> = f.search.to_lowercase().split_whitespace().map(str::to_owned).collect();
     let live = || (0..tracks.len()).filter(|&i| !tracks[i].removed);
 
-    // 1. Source (Library or smart playlist)
+    // 1. Source (Library, smart playlist or playlist)
     let mut ids: Vec<usize> = match f.source {
+        _ if f.playlist.is_some() => f.playlist.clone().unwrap_or_default(),
         SOURCE_RECENTLY_ADDED => {
             let mut ids: Vec<usize> = live().collect();
             ids.sort_by(|&a, &b| tracks[b].date_added.cmp(&tracks[a].date_added));
@@ -531,21 +594,39 @@ impl qobject::LibraryModel {
 
     /// Rebuild the browser columns and the visible song list from the current filters.
     fn refresh(mut self: Pin<&mut Self>) {
-        let filters = Filters {
-            search: self.search.to_string(),
-            genre: self.genre.to_string(),
-            artist: self.artist.to_string(),
-            album: self.album.to_string(),
-            source: self.source,
-            sort_column: self.sort_column.to_string(),
-            ascending: self.sort_ascending,
-        };
         if self.index_stale || self.index.len() != self.tracks.len() {
             let index = SearchIndex::build(&self.tracks);
             let mut rust = self.as_mut().rust_mut();
             rust.index = index;
             rust.index_stale = false;
         }
+        let playlist = self.current_playlist().map(|p| self.index.resolve(&p.tracks));
+        let positions: HashMap<usize, usize> = playlist
+            .iter()
+            .flatten()
+            .enumerate()
+            .map(|(at, &id)| (id, at + 1))
+            .collect();
+        let playlist_length = positions.len() as i32;
+        if self.positions != positions {
+            let mut rust = self.as_mut().rust_mut();
+            rust.positions = positions;
+            rust.rows_dirty = true;
+        }
+        if self.playlist_length != playlist_length {
+            self.as_mut().rust_mut().playlist_length = playlist_length;
+            self.as_mut().playlist_length_changed();
+        }
+        let filters = Filters {
+            search: self.search.to_string(),
+            genre: self.genre.to_string(),
+            artist: self.artist.to_string(),
+            album: self.album.to_string(),
+            source: self.source,
+            playlist,
+            sort_column: self.sort_column.to_string(),
+            ascending: self.sort_ascending,
+        };
         let tracks = &self.tracks;
         let ViewResult { view, genres, artists, albums } = compute_view(tracks, &self.index, &filters);
         let total_ms = view.iter().map(|&i| tracks[i].duration_ms).sum();
@@ -604,15 +685,18 @@ impl qobject::LibraryModel {
         if self.source == source {
             return;
         }
+        let is_playlist = source >= SOURCE_FIRST_PLAYLIST;
         let mut rust = self.as_mut().rust_mut();
         rust.source = source;
+        rust.is_playlist = is_playlist;
         rust.genre = QString::default();
         rust.artist = QString::default();
         rust.album = QString::default();
-        // Smart playlists keep their own ordering
+        // Smart playlists and playlists keep their own ordering
         rust.sort_column = QString::default();
         rust.sort_ascending = true;
         self.as_mut().source_changed();
+        self.as_mut().is_playlist_changed();
         self.as_mut().genre_changed();
         self.as_mut().artist_changed();
         self.as_mut().album_changed();
@@ -1029,6 +1113,10 @@ impl qobject::LibraryModel {
             // Seconds since the epoch (0 = never), formatted for the locale in QML
             Some("dateAdded") => QVariant::from(&(t.date_added as f64)),
             Some("lastPlayed") => QVariant::from(&(t.last_played as f64)),
+            Some("position") => match self.positions.get(&id) {
+                Some(at) => QVariant::from(&QString::from(at.to_string())),
+                None => QVariant::default(),
+            },
             Some(name) => cell_text(t, name)
                 .map(|text| QVariant::from(&QString::from(text)))
                 .unwrap_or_default(),
@@ -1130,6 +1218,174 @@ impl qobject::LibraryModel {
     }
 }
 
+/// Track ids from a JSON array, ignoring anything that isn't one
+fn parse_ids(ids_json: &QString) -> Vec<usize> {
+    serde_json::from_str::<Vec<i64>>(&ids_json.to_string())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|id| usize::try_from(id).ok())
+        .collect()
+}
+
+/// Hand-made playlists
+impl qobject::LibraryModel {
+    fn playlist_slot(&self, source: i32) -> Option<usize> {
+        usize::try_from(source - SOURCE_FIRST_PLAYLIST).ok().filter(|&i| i < self.playlists.len())
+    }
+
+    fn current_playlist(&self) -> Option<&Playlist> {
+        self.playlist_slot(self.source).map(|i| &self.playlists[i])
+    }
+
+    /// File paths of some tracks, in the order the song list shows them (so dragging a
+    /// selection keeps its on-screen order), then any not showing in id order
+    fn paths_of(&self, ids: &[usize]) -> Vec<String> {
+        let shown: HashMap<usize, usize> = self.view.iter().enumerate().map(|(row, &id)| (id, row)).collect();
+        let mut ids: Vec<usize> = ids
+            .iter()
+            .copied()
+            .filter(|&id| self.tracks.get(id).is_some_and(|t| !t.removed))
+            .collect();
+        ids.sort_by_key(|id| (shown.get(id).copied().unwrap_or(usize::MAX), *id));
+        ids.dedup();
+        ids.into_iter().map(|id| self.tracks[id].path.clone()).collect()
+    }
+
+    /// Save playlists after a change, re-sort them by name, and keep the Source list
+    /// showing the playlist that was showing before (by id) even if it moved
+    fn playlists_edited(mut self: Pin<&mut Self>, showing: Option<u64>) {
+        let mut rust = self.as_mut().rust_mut();
+        playlists::sort(&mut rust.playlists);
+        playlists::save(&rust.playlists);
+        let names: Vec<String> = rust.playlists.iter().map(|p| p.name.clone()).collect();
+        let names = to_qstringlist(names);
+        if rust.playlist_names != names {
+            rust.playlist_names = names;
+            self.as_mut().playlist_names_changed();
+        }
+        if let Some(id) = showing
+            && let Some(i) = self.playlists.iter().position(|p| p.id == id)
+        {
+            let source = SOURCE_FIRST_PLAYLIST + i as i32;
+            if self.source != source {
+                self.as_mut().rust_mut().source = source;
+                self.as_mut().source_changed();
+            }
+        }
+    }
+
+    fn showing_id(&self) -> Option<u64> {
+        self.current_playlist().map(|p| p.id)
+    }
+
+    /// Redraw the song list after the shown playlist changed, keeping the scroll position
+    fn refresh_in_place(mut self: Pin<&mut Self>) {
+        let mut rust = self.as_mut().rust_mut();
+        rust.rows_dirty = true;
+        rust.updating = true;
+        self.as_mut().refresh();
+        self.as_mut().rust_mut().updating = false;
+    }
+
+    fn source_of_playlist(&self, id: u64) -> i32 {
+        self.playlists
+            .iter()
+            .position(|p| p.id == id)
+            .map(|i| SOURCE_FIRST_PLAYLIST + i as i32)
+            .unwrap_or(-1)
+    }
+
+    pub fn new_playlist(mut self: Pin<&mut Self>, ids_json: &QString) -> i32 {
+        let paths = self.paths_of(&parse_ids(ids_json));
+        let showing = self.showing_id();
+        let mut playlist = Playlist {
+            id: playlists::next_id(&self.playlists),
+            name: playlists::unique_name(&self.playlists, playlists::UNTITLED),
+            tracks: Vec::new(),
+        };
+        playlist.add(&paths);
+        let id = playlist.id;
+        self.as_mut().rust_mut().playlists.push(playlist);
+        self.as_mut().playlists_edited(showing);
+        self.source_of_playlist(id)
+    }
+
+    pub fn rename_playlist(mut self: Pin<&mut Self>, source: i32, name: &QString) -> i32 {
+        let name = name.to_string().trim().to_owned();
+        let Some(i) = self.playlist_slot(source) else {
+            return source;
+        };
+        let id = self.playlists[i].id;
+        if name.is_empty() || self.playlists[i].name == name {
+            return source;
+        }
+        let showing = self.showing_id();
+        self.as_mut().rust_mut().playlists[i].name = name;
+        self.as_mut().playlists_edited(showing);
+        self.source_of_playlist(id)
+    }
+
+    pub fn delete_playlist(mut self: Pin<&mut Self>, source: i32) {
+        let Some(i) = self.playlist_slot(source) else {
+            return;
+        };
+        let deleting_shown = self.source == source;
+        let showing = self.showing_id();
+        self.as_mut().rust_mut().playlists.remove(i);
+        if deleting_shown {
+            self.as_mut().playlists_edited(None);
+            // The old index now names a different playlist (or none), so switch the long way
+            self.as_mut().rust_mut().source = -1;
+            self.set_source_index(0);
+        } else {
+            self.playlists_edited(showing);
+        }
+    }
+
+    pub fn add_to_playlist(mut self: Pin<&mut Self>, source: i32, ids_json: &QString) -> i32 {
+        let Some(i) = self.playlist_slot(source) else {
+            return 0;
+        };
+        let paths = self.paths_of(&parse_ids(ids_json));
+        let added = self.as_mut().rust_mut().playlists[i].add(&paths);
+        if added > 0 {
+            let showing = self.showing_id();
+            self.as_mut().playlists_edited(showing);
+            if self.source == source {
+                self.refresh_in_place();
+            }
+        }
+        added as i32
+    }
+
+    pub fn remove_from_playlist(mut self: Pin<&mut Self>, ids_json: &QString) {
+        let Some(i) = self.playlist_slot(self.source) else {
+            return;
+        };
+        let paths = self.paths_of(&parse_ids(ids_json));
+        if self.as_mut().rust_mut().playlists[i].remove(&paths) > 0 {
+            let showing = self.showing_id();
+            self.as_mut().playlists_edited(showing);
+            self.refresh_in_place();
+        }
+    }
+
+    pub fn move_in_playlist(mut self: Pin<&mut Self>, ids_json: &QString, before_id: i32) {
+        let Some(i) = self.playlist_slot(self.source) else {
+            return;
+        };
+        let paths = self.paths_of(&parse_ids(ids_json));
+        let before = self.track(before_id).map(|t| t.path.clone());
+        let old = self.playlists[i].tracks.clone();
+        self.as_mut().rust_mut().playlists[i].move_before(&paths, before.as_deref());
+        if self.playlists[i].tracks != old {
+            let showing = self.showing_id();
+            self.as_mut().playlists_edited(showing);
+            self.refresh_in_place();
+        }
+    }
+}
+
 #[cfg(test)]
 mod bench {
     use super::*;
@@ -1152,6 +1408,7 @@ mod bench {
             artist: String::new(),
             album: String::new(),
             source: 0,
+            playlist: None,
             sort_column: String::new(),
             ascending: true,
         };
@@ -1203,6 +1460,7 @@ mod tests {
             artist: String::new(),
             album: String::new(),
             source: 0,
+            playlist: None,
             sort_column: String::new(),
             ascending: true,
         }
@@ -1304,5 +1562,31 @@ mod tests {
             titles(&compute_view(&tracks, &index, &f)),
             ["Comp 1", "Comp 2", "Comp 3", "ABBA 1", "ABBA 2", "Queen 1", "D1 T1", "D1 T2", "D2 T1"]
         );
+    }
+
+    #[test]
+    fn playlist_keeps_its_own_order() {
+        let at = |title: &str, genre: &str| Track { path: format!("/music/{title}.flac"), ..track(title, title, title, genre, 1) };
+        let tracks = vec![at("Alpha", "Rock"), at("Bravo", "Jazz"), at("Charlie", "Rock")];
+        let index = SearchIndex::build(&tracks);
+        let titles = |r: &ViewResult| r.view.iter().map(|&i| tracks[i].title.as_str()).collect::<Vec<_>>();
+        let paths: Vec<String> = [2, 0, 1].iter().map(|&i| tracks[i].path.clone()).collect();
+
+        let mut f = filters("");
+        f.source = SOURCE_FIRST_PLAYLIST;
+        f.playlist = Some(index.resolve(&paths));
+        assert_eq!(titles(&compute_view(&tracks, &index, &f)), ["Charlie", "Alpha", "Bravo"]);
+
+        // Searching and browsing narrow it without reordering
+        f.genre = "rock".into();
+        assert_eq!(titles(&compute_view(&tracks, &index, &f)), ["Charlie", "Alpha"]);
+        f.genre.clear();
+
+        // Clicking a column sorts; the playlist column again reverses playlist order
+        f.sort_column = "title".into();
+        assert_eq!(titles(&compute_view(&tracks, &index, &f)), ["Alpha", "Bravo", "Charlie"]);
+        f.sort_column.clear();
+        f.ascending = false;
+        assert_eq!(titles(&compute_view(&tracks, &index, &f)), ["Bravo", "Alpha", "Charlie"]);
     }
 }

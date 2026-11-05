@@ -23,6 +23,7 @@ fn main() {
                 "qml/EqualizerPanel.qml",
                 "qml/IPod.qml",
                 "qml/ContextMenu.qml",
+                "qml/ConfirmDialog.qml",
                 "qml/SongInfoPanel.qml",
             ]),
     )

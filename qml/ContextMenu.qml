@@ -2,13 +2,44 @@ import QtQuick
 import QtQuick.Controls.Basic
 import org.imelodiae
 
-// Right-click menu. Items are { label, action, checked, enabled } or { separator: true };
-// picking one emits its action.
+// Right-click (or menu bar) menu. Items are { label, action, checked, enabled, shortcut,
+// submenu } or { separator: true }; picking one emits its action. `shortcut` is just
+// shown, greyed, at the right. An item with `submenu: true` opens `childMenu` beside it
+// instead, and picking from that closes this menu too.
 Popup {
     id: root
 
     property var items: []
+    property var childMenu: null
     signal triggered(string action)
+
+    readonly property bool childOpen: childMenu !== null && childMenu.opened
+    // Closing the submenu because the pointer moved to another item, not because
+    // something was picked or the user clicked away
+    property bool switchingAway: false
+
+    function openChild(row) {
+        if (!childMenu || childMenu.opened)
+            return
+        childMenu.popupAt(row, row.width - 3, -4)
+    }
+    function closeChild() {
+        if (childOpen) {
+            switchingAway = true
+            childMenu.close()
+        }
+    }
+
+    Connections {
+        target: root.childMenu
+        function onClosed() {
+            if (root.switchingAway)
+                root.switchingAway = false
+            else
+                root.close()
+        }
+    }
+    onClosed: closeChild()
 
     // Open with the top-left corner at a point in `item`'s coordinates
     function popupAt(item, x, y) {
@@ -24,11 +55,14 @@ Popup {
     padding: 0
     topPadding: 4
     bottomPadding: 4
-    // Wide enough for the longest label, plus the check-mark gutter and right margin
-    width: Math.max(160, 44 + Math.max(0, ...items.map(i => metrics.advanceWidth(i.label ?? ""))))
+    // Wide enough for the longest label and shortcut, plus the check-mark gutter and right margin
+    readonly property real shortcutWidth: Math.max(0, ...items.map(i => metrics.advanceWidth(i.submenu ? "▸" : (i.shortcut ?? ""))))
+    width: Math.max(160, 44 + Math.max(0, ...items.map(i => metrics.advanceWidth(i.label ?? "")))
+                    + (shortcutWidth > 0 ? shortcutWidth + 28 : 0))
     modal: false
     focus: true
-    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+    // While the submenu is open, a click in it would count as outside this menu
+    closePolicy: childOpen ? Popup.CloseOnEscape : Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     FontMetrics {
         id: metrics
@@ -87,7 +121,7 @@ Popup {
             id: row
             readonly property var item: parent ? parent.entry : ({})
             readonly property bool active: item.enabled !== false
-            readonly property bool highlighted: active && mouse.containsMouse
+            readonly property bool highlighted: active && (mouse.containsMouse || (item.submenu === true && root.childOpen))
 
             width: root.width
             height: 20
@@ -109,17 +143,38 @@ Popup {
                 anchors.verticalCenter: parent.verticalCenter
                 text: row.item.label ?? ""
                 elide: Text.ElideRight
+                rightPadding: root.shortcutWidth > 0 ? root.shortcutWidth + 16 : 0
                 font.family: Theme.font
                 font.pixelSize: Theme.listFontSize + 1
                 color: row.highlighted ? Theme.selectionText : row.active ? Theme.text : Theme.dimText
+            }
+            Text {
+                anchors.right: parent.right
+                anchors.rightMargin: 12
+                anchors.verticalCenter: parent.verticalCenter
+                visible: !!row.item.shortcut || row.item.submenu === true
+                text: row.item.submenu ? "▸" : (row.item.shortcut ?? "")
+                font.family: Theme.font
+                font.pixelSize: row.item.submenu ? Theme.listFontSize + 5 : Theme.listFontSize + 1
+                color: row.highlighted ? Theme.selectionText : row.item.submenu ? Theme.text : Theme.dimText
             }
             MouseArea {
                 id: mouse
                 anchors.fill: parent
                 hoverEnabled: true
+                onEntered: {
+                    if (row.item.submenu && row.active)
+                        root.openChild(row)
+                    else
+                        root.closeChild()
+                }
                 onClicked: {
                     if (!row.active)
                         return
+                    if (row.item.submenu) {
+                        root.openChild(row)
+                        return
+                    }
                     root.close()
                     root.triggered(row.item.action)
                 }
