@@ -26,12 +26,23 @@ Rectangle {
     property var order: defaultOrder
     // Set before an update that shouldn't move the list (play counts, imports)
     property bool preserveScroll: false
+    // Showing a hand-made playlist: songs can be dragged into a new order and removed
+    readonly property bool inPlaylist: tracks.isPlaylist
+    // Showing the playlist in its own order, so a drop lands where it's dropped
+    readonly property bool inPlaylistOrder: inPlaylist && tracks.sortColumn === "" && tracks.sortAscending
 
     signal activated(int trackId)
     signal selectionEdited(var trackIds, int current)
     signal widthsEdited(var widths)
     signal orderEdited(var order)
     signal infoRequested(var trackIds)
+    signal removeRequested(var trackIds)
+    signal moveRequested(var trackIds, int beforeId)
+    signal newPlaylistRequested(var trackIds)
+    // Add songs to playlist number `playlist` (0 is the first in the Source list)
+    signal addToPlaylistRequested(int playlist, var trackIds)
+    // Which playlist is showing, or -1
+    property int currentPlaylist: -1
 
     color: "white"
     clip: true
@@ -54,7 +65,12 @@ Rectangle {
         { role: "dateAdded", title: qsTr("Date Added"), width: 130 }
     ]
     readonly property var defaultOrder: ["title", "time", "artist", "album", "genre", "kind", "bitRate", "playCount"]
-    readonly property var statusColumn: ({ role: "status", title: "", width: 20, fixed: true })
+    // In a playlist it also shows each song's place in the playlist; clicking its header
+    // puts the playlist back in its own order
+    readonly property var statusColumn: ({
+        role: "status", title: "", fixed: true,
+        width: inPlaylist ? Math.max(24, Math.ceil(cellMetrics.advanceWidth(String(tracks.playlistLength))) + 22) : 20
+    })
 
     // Shown columns, status first. Song Name is always shown; unknown roles are dropped.
     readonly property var columns: {
@@ -276,7 +292,9 @@ Rectangle {
                     height: 17
                     text: modelData.title
                     alignment: modelData.align ?? Text.AlignLeft
-                    sorted: modelData.role !== "status" && root.tracks.sortColumn === modelData.role
+                    sorted: modelData.role === "status"
+                            ? root.inPlaylist && root.tracks.sortColumn === ""
+                            : root.tracks.sortColumn === modelData.role
                     ascending: root.tracks.sortAscending
 
                     readonly property bool dragging: root.dragRole === modelData.role
@@ -321,6 +339,8 @@ Rectangle {
                                 Qt.callLater(() => root.moveColumn(role, slot))
                             } else if (cell.modelData.role !== "status" && containsMouse) {
                                 root.tracks.sortBy(cell.modelData.role)
+                            } else if (root.inPlaylist && containsMouse) {
+                                root.tracks.sortBy("")
                             }
                         }
                         onCanceled: {
@@ -395,8 +415,26 @@ Rectangle {
         }
     }
 
+    // Add to Playlist ▸
+    ContextMenu {
+        id: playlistMenu
+        items: [{ label: qsTr("New Playlist"), action: "new" }]
+            .concat(root.tracks.playlistNames.length > 0 ? [{ separator: true }] : [])
+            .concat(root.tracks.playlistNames.map((name, i) => ({
+                label: name, action: String(i), enabled: i !== root.currentPlaylist
+            })))
+        onTriggered: action => {
+            const ids = root.selectedIds
+            if (action === "new")
+                root.newPlaylistRequested(ids)
+            else
+                root.addToPlaylistRequested(Number(action), ids)
+        }
+    }
+
     ContextMenu {
         id: songMenu
+        childMenu: playlistMenu
         property int trackId: -1
         items: [
             { label: qsTr("Play"), action: "play" },
@@ -406,10 +444,19 @@ Rectangle {
                 action: "info"
             },
             { separator: true },
+            { label: qsTr("Add to Playlist"), action: "addTo", submenu: true },
+            { label: qsTr("New Playlist from Selection"), action: "newPlaylist", shortcut: "Ctrl+Shift+N" }
+        ].concat(root.inPlaylist ? [{ label: qsTr("Remove from Playlist"), action: "remove", shortcut: "Del" }] : [])
+         .concat([
+            { separator: true },
             { label: qsTr("Show in Folder"), action: "folder" }
-        ]
+        ])
         onTriggered: action => {
-            if (action === "play") {
+            if (action === "newPlaylist") {
+                root.newPlaylistRequested(root.selectedIds)
+            } else if (action === "remove") {
+                root.removeRequested(root.selectedIds)
+            } else if (action === "play") {
                 root.activated(trackId)
             } else if (action === "info") {
                 root.infoRequested(root.selectedIds)
@@ -508,6 +555,19 @@ Rectangle {
             Cell { role: "lastPlayed"; text: visible ? root.formatDate(row.model.lastPlayed) : "" }
             Cell { role: "dateAdded"; text: visible ? root.formatDate(row.model.dateAdded) : "" }
 
+            // Place in the playlist, where the speaker isn't
+            Text {
+                visible: root.inPlaylist && !row.isPlaying
+                width: root.layout[0].width - 6
+                height: row.height
+                horizontalAlignment: Text.AlignRight
+                verticalAlignment: Text.AlignVCenter
+                text: visible ? row.model.position : ""
+                font.family: Theme.font
+                font.pixelSize: Theme.listFontSize
+                color: row.isSelected ? Theme.selectionText : Theme.text
+            }
+
             // Speaker icon, only built for the playing song
             Loader {
                 active: row.isPlaying
@@ -528,6 +588,13 @@ Rectangle {
             MouseArea {
                 anchors.fill: parent
                 acceptedButtons: Qt.LeftButton | Qt.RightButton
+                id: rowMouse
+                // Dragging songs mustn't scroll the list instead
+                preventStealing: true
+                property point pressedAt
+                // Pressed inside a selection of several: keep it, in case it's dragged,
+                // and select just this song on release if it wasn't
+                property bool selectOnRelease: false
                 onPressed: mouse => {
                     if (mouse.button === Qt.RightButton) {
                         // Right-clicking inside the selection acts on all of it
@@ -536,9 +603,37 @@ Rectangle {
                         list.forceActiveFocus()
                         songMenu.trackId = row.model.trackId
                         songMenu.popupAt(row, mouse.x, mouse.y)
-                    } else {
-                        root.clickRow(row.model.trackId, mouse.modifiers)
+                        return
                     }
+                    pressedAt = Qt.point(mouse.x, mouse.y)
+                    selectOnRelease = row.isSelected && root.selectedIds.length > 1
+                                      && !(mouse.modifiers & (Qt.ShiftModifier | Qt.ControlModifier))
+                    if (selectOnRelease)
+                        list.forceActiveFocus()
+                    else
+                        root.clickRow(row.model.trackId, mouse.modifiers)
+                }
+                onPositionChanged: mouse => {
+                    if (!(pressedButtons & Qt.LeftButton))
+                        return
+                    if (!root.dragging) {
+                        if (Math.abs(mouse.x - pressedAt.x) + Math.abs(mouse.y - pressedAt.y) < 6)
+                            return
+                        selectOnRelease = false
+                        root.startDrag(row.isSelected ? root.selectedIds : [row.model.trackId], row.model.title)
+                    }
+                    root.moveDrag(rowMouse, mouse.x, mouse.y)
+                }
+                onReleased: mouse => {
+                    if (root.dragging)
+                        root.finishDrag()
+                    else if (selectOnRelease)
+                        root.clickRow(row.model.trackId, 0)
+                    selectOnRelease = false
+                }
+                onCanceled: {
+                    root.cancelDrag()
+                    selectOnRelease = false
                 }
                 onDoubleClicked: mouse => {
                     if (mouse.button === Qt.LeftButton)
@@ -589,6 +684,11 @@ Rectangle {
             } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                 if (root.selectedId >= 0)
                     root.activated(root.selectedId)
+            } else if (event.key === Qt.Key_Delete || event.key === Qt.Key_Backspace) {
+                if (root.inPlaylist && root.selectedIds.length > 0)
+                    root.removeRequested(root.selectedIds)
+            } else if (event.key === Qt.Key_Escape && root.dragging) {
+                root.cancelDrag()
             } else {
                 return
             }
@@ -619,13 +719,115 @@ Rectangle {
         }
     }
 
+    // ── Dragging songs ── to a playlist in the Source list, or into a new place in this
+    // playlist. A label follows the pointer; drop targets look for the "songs" key.
+    readonly property bool dragging: dragProxy.Drag.active
+
+    function startDrag(ids, title) {
+        dragProxy.trackIds = ids.slice()
+        dragProxy.label = ids.length === 1 ? title : qsTr("%1 songs").arg(ids.length)
+        dragProxy.Drag.active = true
+    }
+    function moveDrag(item, x, y) {
+        const p = item.mapToItem(dragProxy.parent, x, y)
+        dragProxy.x = p.x
+        dragProxy.y = p.y
+    }
+    function finishDrag() {
+        dragProxy.Drag.drop()
+        dragProxy.Drag.active = false
+    }
+    function cancelDrag() {
+        dragProxy.Drag.cancel()
+        dragProxy.Drag.active = false
+    }
+
+    Item {
+        id: dragProxy
+        parent: Overlay.overlay
+        property var trackIds: []
+        property string label: ""
+        visible: Drag.active
+        z: 100
+        Drag.keys: ["songs"]
+
+        Rectangle {
+            x: 12
+            y: 4
+            width: Math.min(260, dragLabel.implicitWidth + 16)
+            height: 18
+            radius: 9
+            color: Qt.rgba(0.24, 0.5, 0.87, 0.85)
+            Text {
+                id: dragLabel
+                anchors.fill: parent
+                anchors.leftMargin: 8
+                anchors.rightMargin: 8
+                verticalAlignment: Text.AlignVCenter
+                text: dragProxy.label
+                elide: Text.ElideRight
+                font.family: Theme.font
+                font.pixelSize: Theme.listFontSize
+                color: "white"
+            }
+        }
+    }
+
+    // Reordering a playlist: drop between rows
+    DropArea {
+        id: reorder
+        anchors.fill: list
+        enabled: root.inPlaylistOrder
+        keys: ["songs"]
+        // The gap the songs would land in: 0 is above the first row
+        readonly property int slot: containsDrag
+            ? Math.max(0, Math.min(list.count, Math.round((drag.y + list.contentY - list.originY) / 17))) : -1
+        onDropped: drop => {
+            const ids = drop.source.trackIds
+            const before = slot < list.count ? root.tracks.idAt(slot) : -1
+            Qt.callLater(() => root.moveRequested(ids, before))
+        }
+    }
+    Rectangle {
+        visible: reorder.containsDrag
+        x: list.x
+        y: list.y + reorder.slot * 17 - list.contentY + list.originY - 1
+        width: list.width
+        height: 2
+        z: 3
+        color: Theme.selection
+    }
+    // Scroll while a drag hovers near the top or bottom edge
+    Timer {
+        interval: 50
+        repeat: true
+        running: reorder.containsDrag && (reorder.drag.y < 17 || reorder.drag.y > reorder.height - 17)
+        onTriggered: {
+            const step = reorder.drag.y < 17 ? -17 : 17
+            const bottom = Math.max(list.originY, list.contentHeight - list.height + list.originY)
+            list.contentY = Math.max(list.originY, Math.min(bottom, list.contentY + step))
+        }
+    }
+
+    Text {
+        anchors.centerIn: list
+        width: Math.min(360, list.width - 40)
+        visible: root.inPlaylist && root.tracks.playlistLength === 0
+        text: qsTr("This playlist is empty.\n\nDrag songs from your Library onto its name in the Source list.")
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.WordWrap
+        font.family: Theme.font
+        font.pixelSize: 12
+        color: Theme.dimText
+    }
+
     Text {
         anchors.centerIn: list
         width: Math.min(360, list.width - 40)
         visible: root.tracks.totalCount === 0
         text: root.tracks.scanning
               ? qsTr("Importing your music…")
-              : qsTr("Your library is empty.\n\nClick the + button below to add a music folder, or drag a folder onto this window.")
+              : qsTr("Your library is empty.\n\nChoose File ▸ Add Folder to Library, or drag a folder onto this window.")
         horizontalAlignment: Text.AlignHCenter
         wrapMode: Text.WordWrap
         font.family: Theme.font

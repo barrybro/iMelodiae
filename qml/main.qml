@@ -102,6 +102,15 @@ Window {
         Component.onCompleted: Qt.callLater(() => library.importDefaultFolder())
     }
 
+    // Each source remembers its own search, so the field follows the library
+    Connections {
+        target: library
+        function onSearchChanged() {
+            if (search.text !== library.search)
+                search.text = library.search
+        }
+    }
+
     Timer {
         // Fast enough for synced lyrics to land on the beat
         interval: 100
@@ -220,6 +229,58 @@ Window {
         }
     }
 
+    // Make an untitled playlist (holding some songs, or none), show it and edit its name
+    function newPlaylist(ids) {
+        if (settings.miniPlayer)
+            return
+        const source = library.newPlaylist(JSON.stringify(ids))
+        library.source = source
+        sourceList.rename(source)
+    }
+
+    // Add dragged songs to a playlist, or to a new one when dropped on empty space
+    function addToPlaylist(source, ids) {
+        if (source < 0) {
+            newPlaylist(ids)
+            return
+        }
+        const name = library.playlistNames[source - sourceList.firstPlaylist]
+        const added = library.addToPlaylist(source, JSON.stringify(ids))
+        if (added === 0)
+            flash(ids.length === 1 ? qsTr("That song is already in “%1”").arg(name)
+                                   : qsTr("Those songs are already in “%1”").arg(name))
+        else
+            flash(added === 1 ? qsTr("Added 1 song to “%1”").arg(name)
+                              : qsTr("Added %1 songs to “%2”").arg(added).arg(name))
+    }
+
+    // Afterwards select the song just above the first one removed (or the new first song),
+    // so the arrow keys carry on from where you were
+    function removeFromPlaylist(ids) {
+        const gone = {}
+        for (const id of ids)
+            gone[id] = true
+        let first = -1
+        for (let row = 0; row < library.count && first < 0; ++row)
+            if (gone[library.idAt(row)])
+                first = row
+        const aboveId = first > 0 ? library.idAt(first - 1) : -1
+
+        trackList.preserveScroll = true
+        library.removeFromPlaylist(JSON.stringify(ids))
+        if (library.count > 0)
+            trackList.select(aboveId >= 0 ? library.rowOfId(aboveId) : 0)
+        else
+            select([], -1)
+    }
+
+    function askToDeletePlaylist(source) {
+        deleteDialog.source = source
+        deleteDialog.heading = qsTr("Delete the playlist “%1”?")
+            .arg(library.playlistNames[source - sourceList.firstPlaylist])
+        deleteDialog.open()
+    }
+
     function snapback() {
         if (playingId < 0)
             return
@@ -256,6 +317,54 @@ Window {
             width: parent.width
             height: 1
             color: Theme.divider
+        }
+
+        // Menu bar: just File for now
+        Rectangle {
+            id: fileButton
+            x: 8
+            y: 2
+            width: fileLabel.implicitWidth + 14
+            height: 17
+            radius: 3
+            color: fileMenu.opened ? Theme.selection : "transparent"
+            Text {
+                id: fileLabel
+                anchors.centerIn: parent
+                text: qsTr("File")
+                font.family: Theme.font
+                font.pixelSize: 13
+                color: fileMenu.opened ? Theme.selectionText : "#1a1a1a"
+            }
+            MouseArea {
+                anchors.fill: parent
+                onPressed: fileMenu.opened ? fileMenu.close() : fileMenu.popupAt(fileButton, 0, fileButton.height + 1)
+            }
+        }
+
+        ContextMenu {
+            id: fileMenu
+            items: [
+                { label: qsTr("New Playlist"), action: "newPlaylist", shortcut: "Ctrl+N" },
+                {
+                    label: qsTr("New Playlist from Selection"), action: "newFromSelection",
+                    shortcut: "Ctrl+Shift+N", enabled: window.selectedIds.length > 0
+                },
+                { separator: true },
+                { label: qsTr("Add Folder to Library…"), action: "addFolder", shortcut: "Ctrl+O" },
+                { separator: true },
+                { label: qsTr("Quit"), action: "quit", shortcut: "Ctrl+Q" }
+            ]
+            onTriggered: action => {
+                if (action === "newPlaylist")
+                    window.newPlaylist([])
+                else if (action === "newFromSelection")
+                    window.newPlaylist(window.selectedIds)
+                else if (action === "addFolder")
+                    folderDialog.open()
+                else if (action === "quit")
+                    Qt.quit()
+            }
         }
 
         Text {
@@ -390,10 +499,16 @@ Window {
             height: parent.height
 
             SourceList {
+                id: sourceList
                 anchors.fill: parent
                 anchors.bottomMargin: artwork.visible ? artwork.height + 1 : 0
                 current: library.source
+                playlists: library.playlistNames
                 onPicked: source => library.source = source
+                onNewPlaylistRequested: window.newPlaylist([])
+                onRenameRequested: (source, name) => library.renamePlaylist(source, name)
+                onDeleteRequested: source => window.askToDeletePlaylist(source)
+                onSongsDropped: (source, ids) => window.addToPlaylist(source, ids)
             }
 
             Rectangle {
@@ -498,6 +613,14 @@ Window {
                 onWidthsEdited: widths => settings.columnWidths = JSON.stringify(widths)
                 onOrderEdited: order => settings.columnOrder = JSON.stringify(order)
                 onInfoRequested: ids => window.showInfo(ids)
+                onRemoveRequested: ids => window.removeFromPlaylist(ids)
+                onMoveRequested: (ids, beforeId) => {
+                    preserveScroll = true
+                    library.moveInPlaylist(JSON.stringify(ids), beforeId)
+                }
+                onNewPlaylistRequested: ids => window.newPlaylist(ids)
+                currentPlaylist: library.isPlaylist ? library.source - sourceList.firstPlaylist : -1
+                onAddToPlaylistRequested: (playlist, ids) => window.addToPlaylist(sourceList.firstPlaylist + playlist, ids)
             }
         }
 
@@ -560,8 +683,8 @@ Window {
 
             AquaSquareButton {
                 glyph: "plus"
-                tooltip: qsTr("Add Folder to Library")
-                onClicked: folderDialog.open()
+                tooltip: qsTr("Create a Playlist")
+                onClicked: window.newPlaylist([])
             }
             AquaSquareButton {
                 glyph: "shuffle"
@@ -700,8 +823,20 @@ Window {
         onAccepted: library.addFolder(selectedFolder.toString())
     }
 
+    ConfirmDialog {
+        id: deleteDialog
+        property int source: -1
+        message: qsTr("The songs stay in your Library. This can't be undone.")
+        confirmText: qsTr("Delete")
+        onConfirmed: library.deletePlaylist(source)
+        onClosed: if (!settings.miniPlayer) sourceList.forceActiveFocus()
+    }
+
+    // Folders dragged in from a file manager (songs dragged inside the window carry a
+    // different key, so they pass through to the playlists)
     DropArea {
         anchors.fill: parent
+        keys: ["text/uri-list"]
         onDropped: drop => {
             for (const url of drop.urls)
                 library.addFolder(url.toString())
@@ -711,7 +846,7 @@ Window {
     // ── Keyboard ─────────────────────────────────────────────────────────
     Shortcut {
         sequence: "Space"
-        enabled: !search.field.activeFocus
+        enabled: !search.field.activeFocus && !sourceList.renaming
         onActivated: window.playPause()
     }
     Shortcut { sequence: "Ctrl+Right"; onActivated: window.next() }
@@ -725,6 +860,12 @@ Window {
         onActivated: search.field.forceActiveFocus()
     }
     Shortcut { sequences: [StandardKey.Open]; onActivated: folderDialog.open() }
+    Shortcut { sequences: [StandardKey.New]; onActivated: window.newPlaylist([]) }
+    Shortcut {
+        sequence: "Ctrl+Shift+N"
+        enabled: window.selectedIds.length > 0
+        onActivated: window.newPlaylist(window.selectedIds)
+    }
     Shortcut { sequence: "Ctrl+B"; onActivated: settings.browserVisible = !settings.browserVisible }
     Shortcut { sequence: "Ctrl+L"; onActivated: window.snapback() }
     Shortcut {

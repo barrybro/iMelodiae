@@ -3,6 +3,7 @@ mod coverart;
 mod library;
 mod lyrics;
 mod player;
+mod playlists;
 mod scanner;
 mod watcher;
 

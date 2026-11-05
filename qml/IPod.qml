@@ -80,7 +80,7 @@ Item {
                 sub(qsTr("Recently Added"), { kind: "songs", title: qsTr("Recently Added"), source: 1 }),
                 sub(qsTr("Top 25 Most Played"), { kind: "songs", title: qsTr("Top 25"), source: 2 }),
                 sub(qsTr("Recently Played"), { kind: "songs", title: qsTr("Recently Played"), source: 3 })
-            ]
+            ].concat(root.library.playlistNames.map((name, i) => sub(name, { kind: "songs", title: name, source: 4 + i })))
         case "genres":
             return root.library.genres.map(g => sub(g, { kind: "artists", title: g, genre: g }))
         case "artists":
@@ -107,6 +107,8 @@ Item {
         if (!["genres", "artists", "albums", "songs"].includes(l.kind))
             return
         root.library.source = l.source ?? 0
+        // The iPod has no search field, so don't let a source's saved search hide songs
+        root.library.search = ""
         root.library.genre = l.genre ?? ""
         root.library.artist = l.artist ?? ""
         root.library.album = l.album ?? ""
