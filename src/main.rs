@@ -2,6 +2,7 @@ mod compositor;
 mod coverart;
 mod library;
 mod lyrics;
+mod mpris;
 mod player;
 mod playlists;
 mod scanner;

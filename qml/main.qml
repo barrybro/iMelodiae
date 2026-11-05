@@ -87,6 +87,44 @@ Window {
         id: songLyrics
     }
 
+    // Media keys and the desktop's "now playing" controls (MPRIS)
+    MediaControls {
+        playing: player.playing
+        loaded: player.loaded
+        position: player.position
+        volume: settings.volume
+        metadata: {
+            void library.artworkRevision // pick up a cover once it's downloaded
+            if (!player.loaded || window.playingId < 0)
+                return ""
+            const np = window.nowPlaying
+            return JSON.stringify({
+                id: window.playingId,
+                title: np.title ?? "",
+                artist: np.artist ?? "",
+                albumArtist: np.albumArtist ?? "",
+                album: np.album ?? "",
+                path: np.path ?? "",
+                durationMs: player.duration > 0 ? player.duration : (np.durationMs ?? 0),
+                artUrl: library.artworkUrl(window.playingId)
+            })
+        }
+        onPlayPauseRequested: window.playPause()
+        onPlayRequested: if (!player.playing) window.playPause()
+        onPauseRequested: if (player.playing) player.toggle()
+        onStopRequested: window.playId(-1)
+        onNextRequested: window.next()
+        onPreviousRequested: window.previous()
+        onSeekRequested: ms => player.seek(ms)
+        onVolumeRequested: volume => settings.volume = volume
+        onRaiseRequested: {
+            window.show()
+            window.raise()
+            window.requestActivate()
+        }
+        onQuitRequested: Qt.quit()
+    }
+
     Compositor {
         id: compositor
     }

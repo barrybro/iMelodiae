@@ -28,6 +28,6 @@ fn main() {
             ]),
     )
     .qt_module("Quick")
-    .files(["src/player.rs", "src/library.rs", "src/lyrics.rs", "src/compositor.rs"])
+    .files(["src/player.rs", "src/library.rs", "src/lyrics.rs", "src/compositor.rs", "src/mpris.rs"])
     .build();
 }
