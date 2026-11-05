@@ -256,6 +256,9 @@ pub struct LibraryModelRust {
     playlists: Vec<Playlist>,
     /// Each shown playlist song's place in the playlist, counting from 1
     positions: HashMap<usize, usize>,
+    /// The search typed in each source other than the one showing, by source_key, so
+    /// switching sources puts back that source's own search (for this run only)
+    searches: HashMap<String, QString>,
     /// Every track; a track's id is its index here. Deleted tracks are flagged
     /// `removed` rather than taken out, so ids never shift while the app runs.
     tracks: Vec<Track>,
@@ -686,7 +689,19 @@ impl qobject::LibraryModel {
             return;
         }
         let is_playlist = source >= SOURCE_FIRST_PLAYLIST;
+        // Each source keeps its own search
+        let (old_key, new_key) = (self.source_key(self.source), self.source_key(source));
         let mut rust = self.as_mut().rust_mut();
+        let old_search = std::mem::take(&mut rust.search);
+        if let Some(key) = old_key {
+            if old_search.is_empty() {
+                rust.searches.remove(&key);
+            } else {
+                rust.searches.insert(key, old_search.clone());
+            }
+        }
+        rust.search = new_key.and_then(|key| rust.searches.remove(&key)).unwrap_or_default();
+        let search_changed = rust.search != old_search;
         rust.source = source;
         rust.is_playlist = is_playlist;
         rust.genre = QString::default();
@@ -697,6 +712,9 @@ impl qobject::LibraryModel {
         rust.sort_ascending = true;
         self.as_mut().source_changed();
         self.as_mut().is_playlist_changed();
+        if search_changed {
+            self.as_mut().search_changed();
+        }
         self.as_mut().genre_changed();
         self.as_mut().artist_changed();
         self.as_mut().album_changed();
@@ -1233,6 +1251,16 @@ impl qobject::LibraryModel {
         usize::try_from(source - SOURCE_FIRST_PLAYLIST).ok().filter(|&i| i < self.playlists.len())
     }
 
+    /// What a source's saved search is filed under: playlists by id, since their
+    /// indices shift as playlists are added, renamed and deleted
+    fn source_key(&self, source: i32) -> Option<String> {
+        match self.playlist_slot(source) {
+            Some(i) => Some(format!("playlist {}", self.playlists[i].id)),
+            None if (0..SOURCE_FIRST_PLAYLIST).contains(&source) => Some(format!("source {source}")),
+            None => None,
+        }
+    }
+
     fn current_playlist(&self) -> Option<&Playlist> {
         self.playlist_slot(self.source).map(|i| &self.playlists[i])
     }
@@ -1331,6 +1359,9 @@ impl qobject::LibraryModel {
         };
         let deleting_shown = self.source == source;
         let showing = self.showing_id();
+        if let Some(key) = self.source_key(source) {
+            self.as_mut().rust_mut().searches.remove(&key);
+        }
         self.as_mut().rust_mut().playlists.remove(i);
         if deleting_shown {
             self.as_mut().playlists_edited(None);

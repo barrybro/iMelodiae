@@ -102,6 +102,15 @@ Window {
         Component.onCompleted: Qt.callLater(() => library.importDefaultFolder())
     }
 
+    // Each source remembers its own search, so the field follows the library
+    Connections {
+        target: library
+        function onSearchChanged() {
+            if (search.text !== library.search)
+                search.text = library.search
+        }
+    }
+
     Timer {
         // Fast enough for synced lyrics to land on the beat
         interval: 100

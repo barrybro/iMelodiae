@@ -107,6 +107,8 @@ Item {
         if (!["genres", "artists", "albums", "songs"].includes(l.kind))
             return
         root.library.source = l.source ?? 0
+        // The iPod has no search field, so don't let a source's saved search hide songs
+        root.library.search = ""
         root.library.genre = l.genre ?? ""
         root.library.artist = l.artist ?? ""
         root.library.album = l.album ?? ""
